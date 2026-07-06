@@ -12,14 +12,20 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
 
-from chat_batches import CHAT_BATCH_OUTPUT_DIR, ChatBatchRequest, ChatBatchSpec, run_chat_batches
-from config import ROOT_DIR, Settings
+from chat_batches import CHAT_BATCH_OUTPUT_DIR, ChatBatchRequest, ChatBatchSpec, create_model_settings, run_chat_batches
+from config import DEFAULT_SCHEMA_CONFIG_PATH, INPUT_DIR, OUTPUT_DIR, ROOT_DIR, Settings, get_runtime_paths
+from codex_jobs import create_codex_job, codex_job_snapshot_for_batch
+from csv_audit import audit_extracted_csv
+from csv_finalization import finalize_extracted_csv
+from schemas import load_schema_config
 
 
 UI_DIR = ROOT_DIR / "ui"
 LOGGER = logging.getLogger(__name__)
 MAX_FILE_SIZE_BYTES = 20 * 1024 * 1024
 VALID_BATCH_NAME = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]*$")
+SAMPLE_ROW_RANGE_PATTERN = re.compile(r"\b(\d{1,2})\s*(?:to|-)\s*(\d{1,2})\s*rows?\b", re.IGNORECASE)
+SAMPLE_ROW_COUNT_PATTERN = re.compile(r"\b(\d{1,2})\s*rows?\b", re.IGNORECASE)
 
 
 class UiServer(ThreadingHTTPServer):
@@ -45,6 +51,9 @@ class UiRequestHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/status":
             self._send_json({"batches": list_batch_summaries()})
             return
+        if parsed.path == "/api/workspace":
+            self._send_json(load_workspace_summary(self.server.settings))
+            return
         if parsed.path.startswith("/api/batches/"):
             batch_name = unquote(parsed.path.removeprefix("/api/batches/"))
             self._send_json(load_batch_detail(batch_name))
@@ -61,6 +70,14 @@ class UiRequestHandler(BaseHTTPRequestHandler):
                 return
             if parsed.path == "/api/run-extraction":
                 response = self._handle_run_extraction(payload)
+                self._send_json(response)
+                return
+            if parsed.path == "/api/audit-batch":
+                response = self._handle_audit_batch(payload)
+                self._send_json(response)
+                return
+            if parsed.path == "/api/sync-batch":
+                response = self._handle_sync_batch(payload)
                 self._send_json(response)
                 return
             self._send_error_json(HTTPStatus.NOT_FOUND, "Endpoint not found.")
@@ -86,13 +103,34 @@ class UiRequestHandler(BaseHTTPRequestHandler):
             document_files=document_files,
         )
 
+        if self.server.settings.uses_codex_chat_assisted_execution:
+            job = create_codex_job(
+                batch_name=batch_name,
+                action="draft_sample",
+                payload={
+                    "instructions": instructions,
+                    "document_files": [path.name for path in document_files],
+                    "sample_row_target": _derive_requested_sample_row_target(instructions),
+                },
+                message="Queued draft sample job for Codex-assisted execution.",
+            )
+            return {
+                "result": {
+                    "queued": True,
+                    "job_id": job.id,
+                    "message": job.message,
+                    "mode": "codex_chat_assisted",
+                },
+                "batch": load_batch_detail(batch_name),
+            }
+
         request = ChatBatchRequest(
             batches=[
                 ChatBatchSpec(
                     name=batch_name,
                     input_files=[str(path) for path in document_files],
-                    instructions=instructions,
-                    infer_schema=True,
+                    draft_only=True,
+                    sample_row_target=_derive_requested_sample_row_target(instructions),
                 )
             ]
         )
@@ -126,6 +164,28 @@ class UiRequestHandler(BaseHTTPRequestHandler):
             document_files=document_files,
         )
 
+        if self.server.settings.uses_codex_chat_assisted_execution:
+            job = create_codex_job(
+                batch_name=batch_name,
+                action="run_extraction",
+                payload={
+                    "instructions": instructions,
+                    "document_files": [path.name for path in document_files],
+                    "sample_csv_path": str(sample_csv_path),
+                    "output_csv_name": str(payload.get("output_csv_name", "")).strip() or "",
+                },
+                message="Queued full extraction job for Codex-assisted execution.",
+            )
+            return {
+                "result": {
+                    "queued": True,
+                    "job_id": job.id,
+                    "message": job.message,
+                    "mode": "codex_chat_assisted",
+                },
+                "batch": load_batch_detail(batch_name),
+            }
+
         request = ChatBatchRequest(
             batches=[
                 ChatBatchSpec(
@@ -148,6 +208,83 @@ class UiRequestHandler(BaseHTTPRequestHandler):
             self._send_error_json(HTTPStatus.NOT_FOUND, "Static file not found.")
             return
         self._send_bytes(HTTPStatus.OK, path.read_bytes(), content_type)
+
+    def _handle_audit_batch(self, payload: dict[str, Any]) -> dict[str, Any]:
+        batch_name = validate_batch_name(payload.get("name"))
+        batch_root = get_batch_root(batch_name)
+        output_dir = batch_root / "output"
+        output_csv = find_output_csv(output_dir)
+        if output_csv is None:
+            raise ValueError("No extracted CSV exists for this batch yet.")
+
+        if self.server.settings.uses_codex_chat_assisted_execution:
+            job = create_codex_job(
+                batch_name=batch_name,
+                action="audit_batch",
+                payload={"output_csv_path": str(output_csv)},
+                message="Queued audit job for Codex-assisted execution.",
+            )
+            return {
+                "audit": {
+                    "queued": True,
+                    "job_id": job.id,
+                    "message": job.message,
+                    "mode": "codex_chat_assisted",
+                },
+                "batch": load_batch_detail(batch_name),
+            }
+
+        settings = _resolve_batch_settings(self.server.settings, output_dir)
+        runtime_paths = get_runtime_paths(batch_root)
+        result = audit_extracted_csv(output_csv, settings, runtime_paths=runtime_paths)
+        return {
+            "audit": {
+                "audit_csv_path": result.audit_csv_path,
+                "report_path": result.report_path,
+                "rows_audited": result.rows_audited,
+                "issue_count": result.issue_count,
+            },
+            "batch": load_batch_detail(batch_name),
+        }
+
+    def _handle_sync_batch(self, payload: dict[str, Any]) -> dict[str, Any]:
+        batch_name = validate_batch_name(payload.get("name"))
+        sync_sample = bool(payload.get("sample"))
+        batch_root = get_batch_root(batch_name)
+        output_dir = batch_root / "output"
+        if sync_sample:
+            csv_path = find_existing_sample_csv(batch_name)
+            if csv_path is None:
+                raise ValueError("No approved sample CSV exists for this batch yet.")
+        else:
+            csv_path = find_output_csv(output_dir)
+            if csv_path is None:
+                raise ValueError("No extracted CSV exists for this batch yet.")
+
+        settings = _resolve_batch_settings(self.server.settings, output_dir)
+        runtime_paths = get_runtime_paths(batch_root)
+        result = finalize_extracted_csv(
+            csv_path,
+            settings,
+            runtime_paths,
+            sync_to_sheets=True,
+            audit_before_sync=not sync_sample,
+        )
+        return {
+            "sync": {
+                "status": result.status,
+                "message": result.message,
+                "csv_path": result.csv_path,
+                "audit_report_path": result.audit_report_path,
+                "rows_audited": result.rows_audited,
+                "issue_count": result.issue_count,
+                "audit_passed": result.audit_passed,
+                "sync_status": result.sync_status,
+                "sync_message": result.sync_message,
+                "sheet_name": result.sheet_name,
+            },
+            "batch": load_batch_detail(batch_name),
+        }
 
     def _read_json_payload(self) -> dict[str, Any]:
         content_length = int(self.headers.get("Content-Length", "0"))
@@ -189,6 +326,26 @@ def validate_batch_name(raw_value: Any) -> str:
     if not VALID_BATCH_NAME.fullmatch(batch_name):
         raise ValueError("Batch name may only contain letters, numbers, dashes, and underscores.")
     return batch_name
+
+
+def _derive_requested_sample_row_target(instructions: str) -> int | None:
+    text = instructions.strip()
+    if not text:
+        return None
+
+    range_match = SAMPLE_ROW_RANGE_PATTERN.search(text)
+    if range_match:
+        lower = int(range_match.group(1))
+        upper = int(range_match.group(2))
+        requested = max(lower, upper)
+        return max(6, min(10, requested))
+
+    count_match = SAMPLE_ROW_COUNT_PATTERN.search(text)
+    if count_match:
+        requested = int(count_match.group(1))
+        return max(6, min(10, requested))
+
+    return None
 
 
 def serialize_batch_result(result: Any) -> dict[str, Any]:
@@ -283,6 +440,32 @@ def list_batch_summaries() -> list[dict[str, Any]]:
     return summaries
 
 
+def load_workspace_summary(settings: Settings) -> dict[str, Any]:
+    schema = load_schema_config(str(DEFAULT_SCHEMA_CONFIG_PATH), settings=settings)
+    final_csv_path = OUTPUT_DIR / "final_extracted_data.csv"
+    return {
+        "workspace_mode": "document_to_csv_studio",
+        "execution_mode": settings.execution_mode,
+        "execution_mode_note": (
+            "Temporary Codex chat assisted mode is configured. The UI remains the intake and review surface."
+            if settings.uses_codex_chat_assisted_execution
+            else "Direct provider execution mode is configured."
+        ),
+        "default_schema_name": schema.schema_name,
+        "default_schema_path": str(DEFAULT_SCHEMA_CONFIG_PATH),
+        "default_schema_field_count": len(schema.fields),
+        "sample_contract_present": schema.sample_contract is not None,
+        "batch_count": len(list_batch_summaries()),
+        "input_document_count": len([path for path in INPUT_DIR.iterdir() if path.is_file()]) if INPUT_DIR.exists() else 0,
+        "final_output_exists": final_csv_path.exists(),
+        "final_output_path": str(final_csv_path),
+        "google_sheets_sync_enabled": bool(settings.google_sheets_sync_enabled),
+        "google_sheets_spreadsheet_id_present": bool(settings.google_sheets_spreadsheet_id),
+        "oauth_client_secret_present": bool(settings.google_oauth_client_secret_path),
+        "oauth_token_present": Path(settings.google_oauth_token_path).expanduser().exists(),
+    }
+
+
 def load_batch_detail(batch_name: str) -> dict[str, Any]:
     batch_name = validate_batch_name(batch_name)
     batch_root = get_batch_root(batch_name)
@@ -293,20 +476,38 @@ def load_batch_detail(batch_name: str) -> dict[str, Any]:
     manifest = read_json_if_exists(batch_root / "ui_manifest.json", {})
     output_csv = find_output_csv(output_dir)
     approved_sample_csv = find_existing_sample_csv(batch_name)
+    sample_template_path = output_dir / "sample_output_template.csv"
+    schema_config_path = output_dir / "schema_config.json"
+    audit_reports = sorted((output_dir / "csv_audits").glob("*.audit_report.json")) if (output_dir / "csv_audits").exists() else []
+    codex_job_status = codex_job_snapshot_for_batch(batch_name)
+    active_draft_job = (
+        codex_job_status.get("action") == "draft_sample"
+        and codex_job_status.get("status") in {"pending", "claimed", "running"}
+    )
+    sample_template_csv = "" if active_draft_job else read_text_if_exists(sample_template_path)
+    sample_template_path_value = "" if active_draft_job else str(sample_template_path) if sample_template_path.exists() else ""
     return {
         "name": batch_name,
         "status": derive_batch_status(batch_root),
         "batch_root": str(batch_root),
         "document_files": [path.name for path in list_existing_document_files(batch_name)],
         "instructions": manifest.get("instructions", ""),
-        "schema_config": read_json_if_exists(output_dir / "schema_config.json", {}),
-        "sample_template_csv": read_text_if_exists(output_dir / "sample_output_template.csv"),
+        "schema_config": read_json_if_exists(schema_config_path, {}),
+        "schema_config_path": str(schema_config_path) if schema_config_path.exists() else "",
+        "sample_template_csv": sample_template_csv,
+        "sample_template_path": sample_template_path_value,
         "approved_sample_csv": read_text_if_exists(approved_sample_csv) if approved_sample_csv else "",
+        "approved_sample_csv_path": str(approved_sample_csv) if approved_sample_csv else "",
         "final_csv": read_text_if_exists(output_csv) if output_csv else "",
         "final_csv_path": str(output_csv) if output_csv else "",
         "manual_review": read_json_if_exists(output_dir / "manual_review.json", []),
         "processing_state": read_json_if_exists(output_dir / "processing_state.json", {}),
         "monitor_status": read_json_if_exists(output_dir / "monitor_status.json", {}),
+        "csv_finalization_status": read_json_if_exists(output_dir / "csv_finalization_status.json", {}),
+        "google_sheets_sync_status": read_json_if_exists(output_dir / "google_sheets_sync_status.json", {}),
+        "codex_job_status": codex_job_status,
+        "latest_audit_report_path": str(audit_reports[-1]) if audit_reports else "",
+        "latest_audit_report": read_json_if_exists(audit_reports[-1], []) if audit_reports else [],
     }
 
 
@@ -315,6 +516,14 @@ def derive_batch_status(batch_root: Path) -> str:
     output_csv = find_output_csv(output_dir)
     manual_review_path = output_dir / "manual_review.json"
     approved_sample = find_existing_sample_csv(batch_root.name)
+    codex_job = codex_job_snapshot_for_batch(batch_root.name)
+    codex_job_status = str(codex_job.get("status", ""))
+    if codex_job_status == "pending":
+        return "queued"
+    if codex_job_status in {"claimed", "running"}:
+        return "processing"
+    if codex_job_status == "failed":
+        return "job_failed"
     if output_csv is not None:
         return "extracted"
     if manual_review_path.exists():
@@ -349,6 +558,13 @@ def read_json_if_exists(path: Path, default: Any) -> Any:
 
 def get_batch_root(batch_name: str) -> Path:
     return CHAT_BATCH_OUTPUT_DIR / batch_name
+
+
+def _resolve_batch_settings(settings: Settings, output_dir: Path) -> Settings:
+    schema_path = output_dir / "schema_config.json"
+    if schema_path.exists():
+        return create_model_settings(settings, schema_path)
+    return settings
 
 
 def sanitize_filename(raw_name: str) -> str:

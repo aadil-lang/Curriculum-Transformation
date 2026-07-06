@@ -5,9 +5,9 @@ import logging
 import re
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
-from agent_engine import _extract_message_text
+from agent_engine import _extract_message_text, _normalize_to_string_list
 from config import Settings, get_settings
 from parsers.base import ParsedDocument
 from schemas import load_schema_config
@@ -27,6 +27,11 @@ class SemanticAuditVerdict(BaseModel):
     is_valid: bool = Field(description="Whether the extracted row is semantically supported by the source.")
     issues: list[str] = Field(default_factory=list, description="Specific issues with unsupported or irrelevant fields.")
     confidence_notes: str = Field(default="", description="Short explanation for the verdict.")
+
+    @field_validator("issues", mode="before")
+    @classmethod
+    def _normalize_issues(cls, value: Any) -> list[str]:
+        return _normalize_to_string_list(value)
 
 
 class ExtractionCritic:
@@ -68,6 +73,9 @@ Validation rules:
 - Reject fields that are semantically irrelevant to the document.
 - Reject rows where important field meanings are mismatched.
 - Reject rows whose transformed values or field placement violate the sample CSV contract.
+- Reject rows that use a generic cross-subject interpretation of subject, domain, topic, source, grade_level, display_grade, or grade_number when the approved sample contract and source support a more specific subject-aligned mapping.
+- Reject local file-name `source` values when the approved sample contract clearly expects canonical public source links and those links are identifiable from the source or staging context.
+- Reject document-wide grade labels when the approved sample contract and source support row-specific stage, learner-band, or life-skills values instead.
 - Reject any row whose `Display standard code` is duplicated within the same CSV context when that duplication is known programmatically.
 - Accept `topic` values joined with ` | ` when one standard genuinely spans multiple topics, the source supports that merged topic cell, and the approved sample contract allows that topic style.
 - Accept synthetic `Display standard code` prefixes such as `DA.1.1` when needed to keep the code unique and the approved sample contract allows transformed or prefixed display codes.
@@ -93,7 +101,7 @@ Original document markdown:
         return [
             {
                 "role": "system",
-                "content": "You are an adversarial data extraction critic. Be skeptical, precise, and strict about style-preserving transformations.",
+                "content": "You are an adversarial data extraction critic. Be skeptical, precise, and strict about style-preserving transformations. Return your response as a single JSON object.",
             },
             {"role": "user", "content": prompt},
         ]

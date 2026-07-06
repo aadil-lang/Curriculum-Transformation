@@ -5,6 +5,7 @@ import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from multiprocessing import cpu_count
+from typing import Literal
 
 
 ROOT_DIR = Path(__file__).resolve().parent
@@ -19,6 +20,12 @@ LOG_PATH = OUTPUT_DIR / "agent.log"
 MONITOR_STATUS_PATH = OUTPUT_DIR / "monitor_status.json"
 DEFAULT_SCHEMA_CONFIG_PATH = ROOT_DIR / "schema_config.json"
 DOT_ENV_PATH = ROOT_DIR / ".env"
+DIRECT_PROVIDER_EXECUTION_MODE = "direct_provider"
+CODEX_CHAT_ASSISTED_EXECUTION_MODE = "codex_chat_assisted"
+SUPPORTED_EXECUTION_MODES = {
+    DIRECT_PROVIDER_EXECUTION_MODE,
+    CODEX_CHAT_ASSISTED_EXECUTION_MODE,
+}
 
 
 def load_dotenv(path: Path = DOT_ENV_PATH, override: bool = False) -> None:
@@ -49,6 +56,9 @@ class Settings:
     extractor_provider: str = field(default_factory=lambda: os.getenv("EXTRACTOR_PROVIDER", "gemini"))
     critic_provider: str = field(default_factory=lambda: os.getenv("CRITIC_PROVIDER", "openai").lower())
     critic_model: str = field(default_factory=lambda: os.getenv("CRITIC_MODEL", "gpt-5.5"))
+    execution_mode: Literal["direct_provider", "codex_chat_assisted"] = field(
+        default_factory=lambda: os.getenv("EXECUTION_MODE", DIRECT_PROVIDER_EXECUTION_MODE).strip().lower()
+    )
     portkey_extractor_provider: str = field(
         default_factory=lambda: os.getenv("PORTKEY_EXTRACTOR_PROVIDER", "@google-ai")
     )
@@ -81,6 +91,17 @@ class Settings:
     google_oauth_token_path: str = field(
         default_factory=lambda: os.getenv("GOOGLE_OAUTH_TOKEN_PATH", str(RUNTIME_DIR / "google_oauth_token.json"))
     )
+
+    def __post_init__(self) -> None:
+        if self.execution_mode not in SUPPORTED_EXECUTION_MODES:
+            supported = ", ".join(sorted(SUPPORTED_EXECUTION_MODES))
+            raise ValueError(
+                f"Unsupported EXECUTION_MODE '{self.execution_mode}'. Supported values: {supported}."
+            )
+
+    @property
+    def uses_codex_chat_assisted_execution(self) -> bool:
+        return self.execution_mode == CODEX_CHAT_ASSISTED_EXECUTION_MODE
 
 
 @dataclass(slots=True)

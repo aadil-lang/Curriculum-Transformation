@@ -4,12 +4,13 @@ import re
 from pathlib import Path
 
 from parsers.base import ParsedDocument
+from parsers.doc_parser import parse_doc
 from parsers.docx_parser import parse_docx
 from parsers.pdf_parser import parse_pdf
 from parsers.web_parser import parse_website_reference
 
 
-SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".url", ".webloc", ".txt"}
+SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".doc", ".url", ".webloc", ".txt"}
 URL_PATTERN = re.compile(r"https?://\S+")
 
 
@@ -27,12 +28,14 @@ def parse_input(path: Path) -> ParsedDocument:
         return parse_pdf(path)
     if suffix == ".docx":
         return parse_docx(path)
+    if suffix == ".doc":
+        return parse_doc(path)
     return parse_website_reference(path)
 
 
 def _is_supported(path: Path) -> bool:
     suffix = path.suffix.lower()
-    if suffix in {".pdf", ".docx", ".url", ".webloc"}:
+    if suffix in {".pdf", ".docx", ".doc", ".url", ".webloc"}:
         return True
     if suffix == ".txt":
         content = path.read_text(encoding="utf-8", errors="ignore")

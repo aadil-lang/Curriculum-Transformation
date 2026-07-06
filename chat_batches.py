@@ -15,6 +15,7 @@ from typing import Any, Callable
 
 from pydantic import BaseModel, Field, create_model
 
+from agent_engine import _extract_message_text, _strip_json_code_fence
 from config import DEFAULT_SCHEMA_CONFIG_PATH, ROOT_DIR, RuntimePaths, Settings, get_runtime_paths
 from pipeline import DataTransformationPipeline, ProcessResult
 from schemas import (
@@ -27,12 +28,14 @@ from schemas import (
 
 CHAT_BATCH_OUTPUT_DIR = ROOT_DIR / "output" / "chat_batches"
 URL_PATTERN = re.compile(r"^https?://", re.IGNORECASE)
-DOWNLOADABLE_REMOTE_SUFFIXES = {".pdf", ".docx", ".csv"}
-DIRECT_DOCUMENT_SUFFIXES = {".pdf", ".docx"}
+DOWNLOADABLE_REMOTE_SUFFIXES = {".pdf", ".docx", ".doc", ".csv"}
+DIRECT_DOCUMENT_SUFFIXES = {".pdf", ".docx", ".doc"}
 MANIFEST_SOURCE_COLUMN_NAMES = ("source", "source_url", "document_url", "pdf_url", "url")
 MIN_SAMPLE_ROWS = 6
 MAX_SAMPLE_ROWS = 10
 OPTIONAL_SAMPLE_COLUMNS = {"l3", "l4", "l5", "standard code", "czi_standard_code"}
+SAMPLE_REVIEW_FILENAME = "sample_draft_review.json"
+SAMPLE_SOURCE_QUERY_PARAMS_TO_REMOVE = {"sample_row"}
 
 
 class ChatBatchSpec(BaseModel):
@@ -42,6 +45,7 @@ class ChatBatchSpec(BaseModel):
     instructions: str | None = None
     infer_schema: bool = False
     draft_only: bool = False
+    sample_row_target: int | None = None
     output_csv_name: str | None = None
 
 
@@ -173,12 +177,23 @@ def _run_single_batch(
         )
 
     if batch.draft_only:
+        process_results: list[dict[str, str]] = []
+        if resolved_input_files:
+            process_results = _run_sample_extraction_draft(
+                batch=batch,
+                settings=settings,
+                schema_config=schema_config,
+                schema_path=schema_path,
+                runtime_paths=runtime_paths,
+                resolved_input_files=resolved_input_files,
+                pipeline_factory=pipeline_factory,
+            )
         return ChatBatchExecutionResult(
             batch_name=batch.name,
             schema_path=str(schema_path),
             output_csv_path=str(runtime_paths.final_csv_path),
             manual_review_path=str(runtime_paths.manual_review_path),
-            results=[],
+            results=process_results,
             mode=f"{mode}_draft_only",
         )
 
@@ -244,7 +259,7 @@ def infer_schema_from_documents(
     settings: Settings,
     batch_name: str,
 ) -> TargetSchemaConfig:
-    if settings.gemini_api_key:
+    if settings.portkey_api_key or settings.gemini_api_key:
         inferred = _infer_schema_with_gemini(input_files, settings, batch_name)
         if inferred is not None:
             return inferred
@@ -258,7 +273,7 @@ def create_schema_from_instructions(
     settings: Settings,
     batch_name: str,
 ) -> TargetSchemaConfig:
-    if settings.gemini_api_key:
+    if settings.portkey_api_key or settings.gemini_api_key:
         inferred = _infer_schema_from_instructions_with_gemini(
             instructions=instructions,
             input_files=input_files,
@@ -358,7 +373,10 @@ def _materialize_remote_reference(reference: str, destination_dir: Path, default
     if suffix in DOWNLOADABLE_REMOTE_SUFFIXES:
         return _download_remote_file(reference, destination_dir, candidate_name or default_stub)
 
-    return _write_website_reference(reference, destination_dir, candidate_name or default_stub)
+    # A landing-page URL may link its real content as a downloadable syllabus
+    # document (.doc/.docx/.pdf). Resolve to that document when one is found,
+    # otherwise fall back to a crawled website reference.
+    return _materialize_webpage_source(reference, destination_dir, _url_slug(reference) or default_stub)
 
 
 def _download_remote_file(reference: str, destination_dir: Path, candidate_name: str) -> Path:
@@ -414,7 +432,7 @@ def _materialize_manifest_source(reference: str, destination_dir: Path, default_
         suffix = Path(candidate_name).suffix.lower()
         if suffix in DIRECT_DOCUMENT_SUFFIXES:
             return _download_remote_file(reference, destination_dir, candidate_name)
-        return _materialize_webpage_source(reference, destination_dir, candidate_name or default_stub)
+        return _materialize_webpage_source(reference, destination_dir, _url_slug(reference) or default_stub)
 
     source_path = Path(reference).expanduser().resolve()
     if not source_path.exists():
@@ -423,10 +441,10 @@ def _materialize_manifest_source(reference: str, destination_dir: Path, default_
 
 
 def _materialize_webpage_source(reference: str, destination_dir: Path, candidate_name: str) -> Path:
-    discovered_pdf_url = _discover_pdf_url_from_webpage(reference)
-    if discovered_pdf_url:
-        discovered_name = Path(urllib.parse.urlparse(discovered_pdf_url).path).name or f"{candidate_name}.pdf"
-        return _download_remote_file(discovered_pdf_url, destination_dir, discovered_name)
+    discovered_document_url = _discover_document_url_from_webpage(reference)
+    if discovered_document_url:
+        discovered_name = Path(urllib.parse.urlparse(discovered_document_url).path).name or f"{candidate_name}"
+        return _download_remote_file(discovered_document_url, destination_dir, discovered_name)
     return _write_website_reference(reference, destination_dir, candidate_name or "website_reference")
 
 
@@ -441,34 +459,58 @@ def _find_manifest_source_column(headers: list[str]) -> str | None:
     return None
 
 
-def _discover_pdf_url_from_webpage(reference: str) -> str | None:
+def _discover_document_url_from_webpage(reference: str) -> str | None:
     try:
-        with urllib.request.urlopen(reference) as response:
+        request = urllib.request.Request(reference, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(request) as response:
             html_text = response.read().decode("utf-8", errors="ignore")
             base_url = response.geturl() or reference
     except urllib.error.URLError:
         return None
 
-    parser = _PdfLinkParser(base_url)
+    parser = _DocumentLinkParser(base_url)
     parser.feed(html_text)
-    if not parser.pdf_links:
+    if not parser.document_links:
         return None
 
-    ranked_links = sorted(parser.pdf_links, key=_pdf_link_rank, reverse=True)
-    return ranked_links[0][0]
+    ranked_links = sorted(parser.document_links, key=_document_link_rank, reverse=True)
+    best_url, best_score = ranked_links[0][0], _document_link_rank(ranked_links[0])
+    # Only accept a discovered document when it looks like real curriculum content,
+    # not incidental noise (assessment schedules, support material, etc.).
+    if best_score[0] <= 0:
+        return None
+    return best_url
 
 
-def _pdf_link_rank(item: tuple[str, str]) -> tuple[int, int]:
+_DOCUMENT_POSITIVE_KEYWORDS = ("download syllabus", "syllabus", "curriculum", "outcomes", "course")
+_DOCUMENT_NEGATIVE_KEYWORDS = (
+    "assessment",
+    "sample",
+    "support material",
+    "support",
+    "resource",
+    "record of changes",
+    "glossary",
+    "schedule",
+    "advice",
+    "guide",
+    "fact sheet",
+)
+
+
+def _document_link_rank(item: tuple[str, str]) -> tuple[int, int]:
     url, label = item
-    lowered_url = url.lower()
-    lowered_label = label.lower()
+    haystack = f"{url.lower()} {label.lower()}"
     score = 0
-    for keyword in ("syllabus", "curriculum", "download", "pdf", "stage", "year"):
-        if keyword in lowered_url:
-            score += 2
-        if keyword in lowered_label:
-            score += 1
-    return score, -len(lowered_url)
+    if "download syllabus" in label.lower():
+        score += 6
+    for keyword in _DOCUMENT_POSITIVE_KEYWORDS:
+        if keyword in haystack:
+            score += 3
+    for keyword in _DOCUMENT_NEGATIVE_KEYWORDS:
+        if keyword in haystack:
+            score -= 4
+    return score, -len(url)
 
 
 def _write_website_reference(reference: str, destination_dir: Path, candidate_name: str) -> Path:
@@ -490,6 +532,24 @@ def _safe_filename(value: str) -> str:
 def _safe_stem(value: str) -> str:
     cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", value).strip("._")
     return cleaned or "input"
+
+
+_GENERIC_URL_SEGMENTS = {"outcomes", "index", "home", "content", "overview", "default"}
+
+
+def _url_slug(reference: str) -> str:
+    parsed = urllib.parse.urlparse(reference)
+    segments = [segment for segment in parsed.path.split("/") if segment]
+    if not segments:
+        return _safe_stem(parsed.netloc)
+    # Drop a trailing generic segment (e.g. ".../child-studies-7-10-2025/outcomes")
+    # so the staged name reflects the subject, and keep the last two path parts
+    # to preserve uniqueness across subjects.
+    if len(segments) >= 2 and segments[-1].lower() in _GENERIC_URL_SEGMENTS:
+        meaningful = segments[-2:]
+    else:
+        meaningful = segments[-1:]
+    return _safe_stem("-".join(meaningful))
 
 
 def _dedupe_path(path: Path) -> Path:
@@ -517,30 +577,350 @@ def _merge_unique_paths(primary: list[Path], secondary: list[Path]) -> list[Path
 
 
 def _write_sample_csv_template(path: Path, schema_config: TargetSchemaConfig) -> None:
-    headers = ["source_document", "source_type", "source_identifier", "processed_at_utc"]
-    for spec in schema_config.fields:
-        output_column = spec.output_column or spec.name
-        headers.append(output_column)
-        headers.append(f"{output_column}_source_citation")
-
-    sample_rows: list[list[str]] = []
-    for index in range(1, MIN_SAMPLE_ROWS + 1):
-        row = [
-            f"example_document_{index}.pdf",
-            "pdf",
-            f"example_document_{index}",
-            datetime.now(timezone.utc).isoformat(),
-        ]
-        for spec in schema_config.fields:
-            example_value = _expand_example_value(spec.example_value, index)
-            row.append(example_value)
-            row.append(example_value)
-        sample_rows.append(row)
+    headers = _sample_template_headers(schema_config)
+    sample_rows = _sample_template_rows(schema_config, headers)
 
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle)
         writer.writerow(headers)
         writer.writerows(sample_rows)
+
+
+def _sample_template_headers(schema_config: TargetSchemaConfig) -> list[str]:
+    sample_contract = schema_config.sample_contract
+    if sample_contract and sample_contract.column_order:
+        return sample_contract.column_order
+    return [spec.output_column or spec.name for spec in schema_config.fields]
+
+
+def _sample_template_rows(schema_config: TargetSchemaConfig, headers: list[str]) -> list[list[str]]:
+    contract_rows = schema_config.sample_contract.sample_rows if schema_config.sample_contract else []
+    if contract_rows:
+        return [
+            [_sample_template_cell_value(header, contract_rows, schema_config.fields, index) for header in headers]
+            for index in range(1, MIN_SAMPLE_ROWS + 1)
+        ]
+
+    return [
+        [_expand_example_value(_example_value_for_header(header, schema_config.fields), index) for header in headers]
+        for index in range(1, MIN_SAMPLE_ROWS + 1)
+    ]
+
+
+def _run_sample_extraction_draft(
+    *,
+    batch: ChatBatchSpec,
+    settings: Settings,
+    schema_config: TargetSchemaConfig,
+    schema_path: Path,
+    runtime_paths: RuntimePaths,
+    resolved_input_files: list[Path],
+    pipeline_factory: Callable[[Settings, RuntimePaths], DataTransformationPipeline] | None = None,
+) -> list[dict[str, str]]:
+    batch_settings = create_model_settings(settings, schema_path)
+    pipeline = (
+        pipeline_factory(batch_settings, runtime_paths)
+        if pipeline_factory
+        else DataTransformationPipeline(settings=batch_settings, runtime_paths=runtime_paths)
+    )
+
+    sample_row_target = _normalize_sample_row_target(batch.sample_row_target)
+    process_results: list[dict[str, str]] = []
+    headers = _sample_template_headers(schema_config)
+
+    # Replace scaffold/example rows immediately so the preview only ever shows
+    # real extracted rows or an intentionally empty draft.
+    _write_sample_rows_to_csv(runtime_paths.output_dir / "sample_output_template.csv", headers, [])
+
+    for path in resolved_input_files:
+        result = pipeline.process_path(path)
+        process_results.append(
+            {
+                "path": str(result.path),
+                "status": result.status,
+                "message": result.message,
+                "stage": result.stage,
+            }
+        )
+        if _count_csv_rows(runtime_paths.final_csv_path) >= sample_row_target:
+            break
+
+    extracted_rows = _read_extracted_sample_rows(runtime_paths.final_csv_path, schema_config)
+    selected_rows = _select_sample_rows(extracted_rows, schema_config, sample_row_target)
+    sample_rows = _normalize_sample_rows_for_draft(selected_rows, schema_config)
+    review_payload = _audit_sample_rows(sample_rows, schema_config, sample_row_target)
+    _write_sample_review_artifact(runtime_paths.output_dir / SAMPLE_REVIEW_FILENAME, review_payload)
+
+    if review_payload["status"] == "valid":
+        _write_sample_rows_to_csv(runtime_paths.output_dir / "sample_output_template.csv", headers, sample_rows)
+    else:
+        # Avoid leaving misleading placeholder rows behind when real sample extraction fails.
+        _write_sample_rows_to_csv(runtime_paths.output_dir / "sample_output_template.csv", headers, [])
+
+    _clear_draft_processing_state(runtime_paths)
+    return process_results
+
+
+def _normalize_sample_row_target(raw_value: int | None) -> int:
+    if raw_value is None:
+        return MIN_SAMPLE_ROWS
+    return max(MIN_SAMPLE_ROWS, min(MAX_SAMPLE_ROWS, raw_value))
+
+
+def _count_csv_rows(path: Path) -> int:
+    if not path.exists():
+        return 0
+    with path.open(newline="", encoding="utf-8-sig") as handle:
+        reader = csv.reader(handle)
+        next(reader, None)
+        return sum(1 for _ in reader)
+
+
+def _read_extracted_sample_rows(csv_path: Path, schema_config: TargetSchemaConfig) -> list[dict[str, str]]:
+    if not csv_path.exists():
+        return []
+
+    headers = _sample_template_headers(schema_config)
+    rows: list[dict[str, str]] = []
+    with csv_path.open(newline="", encoding="utf-8-sig") as handle:
+        reader = csv.DictReader(handle)
+        for raw_row in reader:
+            cleaned_row = {header: (raw_row.get(header, "") or "").strip() for header in headers}
+            if any(cleaned_row.values()):
+                rows.append(cleaned_row)
+    return rows
+
+
+def _select_sample_rows(
+    rows: list[dict[str, str]],
+    schema_config: TargetSchemaConfig,
+    sample_row_target: int,
+) -> list[dict[str, str]]:
+    if not rows:
+        return []
+
+    headers = _sample_template_headers(schema_config)
+    source_header = _find_header(headers, "source")
+    if not source_header:
+        return rows[:sample_row_target]
+
+    best_block: list[dict[str, str]] = []
+    current_block: list[dict[str, str]] = []
+    current_source = ""
+    for row in rows:
+        row_source = _sanitize_sample_source_value((row.get(source_header, "") or "").strip())
+        if current_block and row_source != current_source:
+            if _sample_row_block_score(current_block, schema_config) > _sample_row_block_score(best_block, schema_config):
+                best_block = current_block
+            current_block = []
+        current_block.append(row)
+        current_source = row_source
+
+    if _sample_row_block_score(current_block, schema_config) > _sample_row_block_score(best_block, schema_config):
+        best_block = current_block
+
+    selected = best_block or rows
+    return selected[:sample_row_target]
+
+
+def _sample_row_block_score(
+    rows: list[dict[str, str]],
+    schema_config: TargetSchemaConfig,
+) -> tuple[int, int]:
+    if not rows:
+        return (0, 0)
+    description_header = _find_header(_sample_template_headers(schema_config), "description")
+    if not description_header:
+        return (len(rows), 0)
+    descriptions = {
+        (row.get(description_header, "") or "").strip().lower()
+        for row in rows
+        if (row.get(description_header, "") or "").strip()
+    }
+    return (len(rows), len(descriptions))
+
+
+def _normalize_sample_rows_for_draft(
+    rows: list[dict[str, str]],
+    schema_config: TargetSchemaConfig,
+) -> list[dict[str, str]]:
+    headers = _sample_template_headers(schema_config)
+    normalized_rows: list[dict[str, str]] = []
+    for row in rows:
+        normalized_row: dict[str, str] = {}
+        for header in headers:
+            value = (row.get(header, "") or "").strip()
+            lowered_header = header.strip().lower()
+            if lowered_header in OPTIONAL_SAMPLE_COLUMNS or lowered_header == "standard code":
+                normalized_row[header] = ""
+                continue
+            if lowered_header == "source":
+                normalized_row[header] = _sanitize_sample_source_value(value)
+                continue
+            normalized_row[header] = value
+        normalized_rows.append(normalized_row)
+    return normalized_rows
+
+
+def _sanitize_sample_source_value(value: str) -> str:
+    if not value:
+        return value
+    parsed = urllib.parse.urlparse(value)
+    if not parsed.scheme or not parsed.netloc:
+        return value
+    query_pairs = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+    filtered_query = [
+        (key, item_value)
+        for key, item_value in query_pairs
+        if key.lower() not in SAMPLE_SOURCE_QUERY_PARAMS_TO_REMOVE
+    ]
+    return urllib.parse.urlunparse(
+        parsed._replace(query=urllib.parse.urlencode(filtered_query, doseq=True))
+    )
+
+
+def _audit_sample_rows(
+    rows: list[dict[str, str]],
+    schema_config: TargetSchemaConfig,
+    sample_row_target: int,
+) -> dict[str, Any]:
+    headers = _sample_template_headers(schema_config)
+    issues: list[str] = []
+
+    if len(rows) < MIN_SAMPLE_ROWS:
+        issues.append(
+            f"Sample draft produced only {len(rows)} data row(s); at least {MIN_SAMPLE_ROWS} are required."
+        )
+
+    source_header = _find_header(headers, "source")
+    description_header = _find_header(headers, "description")
+    display_code_header = _find_header(headers, "display standard code")
+    topic_header = _find_header(headers, "topic")
+
+    for row_index, row in enumerate(rows, start=1):
+        if description_header and not (row.get(description_header, "") or "").strip():
+            issues.append(f"Row {row_index} is missing description.")
+        for optional_header in headers:
+            lowered_header = optional_header.strip().lower()
+            if lowered_header in OPTIONAL_SAMPLE_COLUMNS or lowered_header == "standard code":
+                if (row.get(optional_header, "") or "").strip():
+                    issues.append(f"Row {row_index} should keep '{optional_header}' blank in sample mode.")
+        if topic_header:
+            topic_value = (row.get(topic_header, "") or "").strip()
+            if re.fullmatch(r"(?i)cluster\s+\d+(\.\d+)*", topic_value):
+                issues.append(f"Row {row_index} uses a generic cluster label in Topic instead of a named heading.")
+
+    if description_header:
+        descriptions = [
+            (row.get(description_header, "") or "").strip()
+            for row in rows
+            if (row.get(description_header, "") or "").strip()
+        ]
+        if descriptions and len(set(descriptions)) == 1 and len(descriptions) > 1:
+            issues.append("All sample rows have the same description, which suggests the draft is not using real row boundaries.")
+
+    if display_code_header:
+        display_codes = [
+            (row.get(display_code_header, "") or "").strip()
+            for row in rows
+            if (row.get(display_code_header, "") or "").strip()
+        ]
+        if len(display_codes) != len(set(display_codes)):
+            issues.append("Display standard code must be unique across the sample draft.")
+
+    if source_header:
+        invalid_sources = [
+            (row.get(source_header, "") or "").strip()
+            for row in rows
+            if "sample_row=" in (row.get(source_header, "") or "")
+        ]
+        if invalid_sources:
+            issues.append("Source links still contain internal sample row query markers.")
+
+    return {
+        "status": "valid" if not issues else "invalid",
+        "row_target": sample_row_target,
+        "row_count": len(rows),
+        "issues": list(dict.fromkeys(issues)),
+        "headers": headers,
+    }
+
+
+def _write_sample_review_artifact(path: Path, payload: dict[str, Any]) -> None:
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def _find_header(headers: list[str], normalized_name: str) -> str | None:
+    target = normalized_name.strip().lower()
+    for header in headers:
+        if header.strip().lower() == target:
+            return header
+    return None
+
+
+def _write_sample_rows_to_csv(path: Path, headers: list[str], rows: list[dict[str, str]]) -> None:
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=headers)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({header: row.get(header, "") for header in headers})
+
+
+def _clear_draft_processing_state(runtime_paths: RuntimePaths) -> None:
+    for artifact_path in (
+        runtime_paths.final_csv_path,
+        runtime_paths.state_path,
+        runtime_paths.csv_finalization_status_path,
+    ):
+        if artifact_path.exists():
+            artifact_path.unlink()
+
+
+def _sample_template_cell_value(
+    header: str,
+    contract_rows: list[dict[str, str]],
+    fields: list[SchemaFieldSpec],
+    index: int,
+) -> str:
+    source_row = contract_rows[(index - 1) % len(contract_rows)]
+    value = (source_row.get(header, "") or "").strip()
+    if value:
+        return _expand_contract_sample_value(header, value, index)
+    return _expand_example_value(_example_value_for_header(header, fields), index)
+
+
+def _example_value_for_header(header: str, fields: list[SchemaFieldSpec]) -> str | None:
+    for spec in fields:
+        output_column = spec.output_column or spec.name
+        if output_column == header:
+            return spec.example_value
+    return None
+
+
+def _expand_contract_sample_value(header: str, value: str, index: int) -> str:
+    if index == 1:
+        return value
+
+    lowered_header = header.strip().lower()
+    if lowered_header == "source":
+        return value
+    if lowered_header in {"display standard code", "standard code"}:
+        return _increment_code_suffix(value, index - 1)
+    if lowered_header == "description":
+        return value
+    if lowered_header in {"subject", "domain", "topic", "l3", "l4", "l5", "grade_level", "display_grade", "grade_number", "czi_standard_code"}:
+        return value
+    return _expand_example_value(value, index)
+
+
+def _increment_code_suffix(value: str, offset: int) -> str:
+    match = re.search(r"(\d+)(?!.*\d)", value)
+    if not match:
+        return f"{value}.{offset + 1}"
+
+    start, end = match.span(1)
+    incremented = str(int(match.group(1)) + offset).zfill(len(match.group(1)))
+    return f"{value[:start]}{incremented}{value[end:]}"
 
 
 def _expand_example_value(example_value: str | None, index: int) -> str:
@@ -929,11 +1309,11 @@ def _infer_output_quality_rules(headers: list[str], rows: list[dict[str, str]]) 
     return rules
 
 
-class _PdfLinkParser(html.parser.HTMLParser):
+class _DocumentLinkParser(html.parser.HTMLParser):
     def __init__(self, base_url: str) -> None:
         super().__init__()
         self.base_url = base_url
-        self.pdf_links: list[tuple[str, str]] = []
+        self.document_links: list[tuple[str, str]] = []
         self._current_href: str | None = None
         self._current_text_parts: list[str] = []
 
@@ -945,7 +1325,7 @@ class _PdfLinkParser(html.parser.HTMLParser):
         if not href:
             return
         absolute_href = urllib.parse.urljoin(self.base_url, href)
-        if self._looks_like_pdf_link(absolute_href, attributes):
+        if self._looks_like_document_link(absolute_href, attributes):
             self._current_href = absolute_href
             self._current_text_parts = []
 
@@ -957,38 +1337,92 @@ class _PdfLinkParser(html.parser.HTMLParser):
         if tag.lower() != "a" or self._current_href is None:
             return
         label = " ".join(part for part in self._current_text_parts if part).strip()
-        self.pdf_links.append((self._current_href, label))
+        self.document_links.append((self._current_href, label))
         self._current_href = None
         self._current_text_parts = []
 
     @staticmethod
-    def _looks_like_pdf_link(url: str, attributes: dict[str, str]) -> bool:
+    def _looks_like_document_link(url: str, attributes: dict[str, str]) -> bool:
         lowered_url = url.lower()
-        if ".pdf" in lowered_url:
+        path_only = urllib.parse.urlparse(lowered_url).path
+        if path_only.endswith((".pdf", ".docx", ".doc")):
             return True
         type_attr = attributes.get("type", "").lower()
-        if "pdf" in type_attr:
+        if any(marker in type_attr for marker in ("pdf", "msword", "wordprocessingml")):
             return True
         return False
 
 
-def _infer_schema_with_gemini(
-    input_files: list[Path],
-    settings: Settings,
-    batch_name: str,
-) -> TargetSchemaConfig | None:
+def _document_snippets(input_files: list[Path], limit: int, excerpt_chars: int) -> list[dict[str, str]]:
+    if not input_files:
+        return []
     from parsers.router import parse_input
 
-    documents = [parse_input(path) for path in input_files[:3]]
-    snippets = []
-    for document in documents:
+    snippets: list[dict[str, str]] = []
+    for path in input_files[:limit]:
+        document = parse_input(path)
         snippets.append(
             {
                 "source_name": document.source_name,
                 "source_type": document.source_type,
-                "markdown_excerpt": document.markdown[:4000],
+                "markdown_excerpt": document.markdown[:excerpt_chars],
             }
         )
+    return snippets
+
+
+def _infer_target_schema_via_portkey(
+    settings: Settings,
+    system_prompt: str,
+    user_prompt: str,
+) -> TargetSchemaConfig | None:
+    if not settings.portkey_api_key:
+        return None
+
+    try:
+        from portkey_ai import Portkey
+    except ImportError:
+        return None
+
+    schema_json = json.dumps(TargetSchemaConfig.model_json_schema(), indent=2)
+    user_prompt = (
+        f"{user_prompt}\n\n"
+        "Return a single JSON object that conforms to this TargetSchemaConfig JSON schema:\n"
+        f"{schema_json}"
+    )
+
+    client = Portkey(
+        api_key=settings.portkey_api_key,
+        provider=settings.portkey_extractor_provider,
+    )
+    try:
+        response = client.chat.completions.create(
+            model=settings.extractor_model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0,
+            response_format={"type": "json_object"},
+        )
+    except Exception:
+        return None
+
+    try:
+        content = _extract_message_text(response)
+        payload = json.loads(_strip_json_code_fence(content))
+        return TargetSchemaConfig.model_validate(payload)
+    except Exception:
+        return None
+
+
+def _infer_target_schema_via_gemini(
+    settings: Settings,
+    system_prompt: str,
+    user_prompt: str,
+) -> TargetSchemaConfig | None:
+    if not settings.gemini_api_key:
+        return None
 
     import instructor
     from google import genai
@@ -1007,6 +1441,42 @@ def _infer_schema_with_gemini(
             continue
     if client is None:
         return None
+
+    try:
+        return client.chat.completions.create(
+            model=settings.extractor_model,
+            response_model=TargetSchemaConfig,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            max_retries=0,
+        )
+    except Exception:
+        return None
+
+
+def _infer_schema_with_gemini(
+    input_files: list[Path],
+    settings: Settings,
+    batch_name: str,
+) -> TargetSchemaConfig | None:
+    snippets = _document_snippets(input_files, limit=3, excerpt_chars=4000)
+    system_prompt = "You design compact CSV schemas for semi-structured document extraction."
+    user_prompt = f"""
+Infer a practical CSV schema for this document batch.
+Return a TargetSchemaConfig with snake_case field names and human-friendly output_column values.
+Prefer 4 to 8 fields. Avoid redundant metadata fields already captured separately.
+
+Batch name: {batch_name}
+Document snippets:
+{json.dumps(snippets, indent=2)}
+""".strip()
+
+    return (
+        _infer_target_schema_via_portkey(settings, system_prompt, user_prompt)
+        or _infer_target_schema_via_gemini(settings, system_prompt, user_prompt)
+    )
 
 
 def _infer_schema_from_instructions_with_gemini(
@@ -1016,39 +1486,9 @@ def _infer_schema_from_instructions_with_gemini(
     settings: Settings,
     batch_name: str,
 ) -> TargetSchemaConfig | None:
-    snippets: list[dict[str, str]] = []
-    if input_files:
-        from parsers.router import parse_input
-
-        documents = [parse_input(path) for path in input_files[:2]]
-        for document in documents:
-            snippets.append(
-                {
-                    "source_name": document.source_name,
-                    "source_type": document.source_type,
-                    "markdown_excerpt": document.markdown[:3000],
-                }
-            )
-
-    import instructor
-    from google import genai
-
-    raw_client = genai.Client(api_key=settings.gemini_api_key)
-    build_candidates = [
-        lambda: instructor.from_genai(raw_client, mode=instructor.Mode.GEMINI_JSON),
-        lambda: instructor.from_gemini(raw_client, mode=instructor.Mode.GEMINI_JSON),
-    ]
-    client = None
-    for builder in build_candidates:
-        try:
-            client = builder()
-            break
-        except Exception:
-            continue
-    if client is None:
-        return None
-
-    prompt = f"""
+    snippets = _document_snippets(input_files, limit=2, excerpt_chars=3000)
+    system_prompt = "You create practical CSV schemas from user extraction instructions."
+    user_prompt = f"""
 Create a CSV extraction schema from the user's instructions.
 Return a TargetSchemaConfig with:
 - snake_case internal field names
@@ -1064,47 +1504,10 @@ Optional document snippets:
 {json.dumps(snippets, indent=2)}
 """.strip()
 
-    try:
-        return client.chat.completions.create(
-            model=settings.extractor_model,
-            response_model=TargetSchemaConfig,
-            messages=[
-                {
-                    "role": "system",
-                    "content": "You create practical CSV schemas from user extraction instructions.",
-                },
-                {"role": "user", "content": prompt},
-            ],
-            max_retries=0,
-        )
-    except Exception:
-        return None
-
-    prompt = f"""
-Infer a practical CSV schema for this document batch.
-Return a TargetSchemaConfig with snake_case field names and human-friendly output_column values.
-Prefer 4 to 8 fields. Avoid redundant metadata fields already captured separately.
-
-Batch name: {batch_name}
-Document snippets:
-{json.dumps(snippets, indent=2)}
-""".strip()
-
-    try:
-        return client.chat.completions.create(
-            model=settings.extractor_model,
-            response_model=TargetSchemaConfig,
-            messages=[
-                {
-                    "role": "system",
-                    "content": "You design compact CSV schemas for semi-structured document extraction.",
-                },
-                {"role": "user", "content": prompt},
-            ],
-            max_retries=0,
-        )
-    except Exception:
-        return None
+    return (
+        _infer_target_schema_via_portkey(settings, system_prompt, user_prompt)
+        or _infer_target_schema_via_gemini(settings, system_prompt, user_prompt)
+    )
 
 
 def _heuristic_schema_from_documents(batch_name: str) -> TargetSchemaConfig:

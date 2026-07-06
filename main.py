@@ -16,6 +16,7 @@ from chat_batches import (
     run_chat_batches,
 )
 from config import DEFAULT_SCHEMA_CONFIG_PATH, INPUT_DIR, OUTPUT_DIR, ROOT_DIR, Settings, ensure_directories, get_runtime_paths, get_settings, setup_logging
+from codex_jobs import claim_next_codex_job, list_codex_jobs, load_codex_job, update_codex_job
 from csv_audit import audit_extracted_csv
 from csv_finalization import finalize_extracted_csv
 from google_sheets_sync import authorize_google_sheets_user
@@ -63,6 +64,7 @@ def verify_command(settings: Settings) -> int:
             "imports": report,
             "input_dir_exists": INPUT_DIR.exists(),
             "output_dir_exists": OUTPUT_DIR.exists(),
+            "execution_mode": settings.execution_mode,
             "gateway_mode": "portkey" if settings.portkey_api_key else "direct_provider_keys",
             "portkey_api_key_present": bool(settings.portkey_api_key),
             "watch_interval_seconds": settings.watch_interval_seconds,
@@ -157,11 +159,19 @@ def status_command() -> int:
                 "source": default_schema_source,
             },
             "llm_access": {
+                "execution_mode": settings.execution_mode,
+                "codex_chat_assisted": settings.uses_codex_chat_assisted_execution,
                 "gateway_mode": "portkey" if settings.portkey_api_key else "direct_provider_keys",
                 "portkey_api_key_present": bool(settings.portkey_api_key),
                 "gemini_api_key_present": bool(settings.gemini_api_key),
                 "openai_api_key_present": bool(settings.openai_api_key),
                 "anthropic_api_key_present": bool(settings.anthropic_api_key),
+                "mode_note": (
+                    "Temporary Codex chat assisted mode is enabled. Keep the UI as the intake/review surface, "
+                    "and use Codex chat as the execution surface until a dedicated queue worker is introduced."
+                    if settings.uses_codex_chat_assisted_execution
+                    else "Direct provider execution mode is enabled."
+                ),
             },
             "parallelism": {
                 "extraction_max_workers": settings.extraction_max_workers,
@@ -213,6 +223,11 @@ def status_command() -> int:
                 "Use a sample CSV from chat when one is provided.",
                 "Otherwise use the workspace default schema for extraction runs.",
                 "Append rows only after the critic returns VALID.",
+                (
+                    "Codex chat assisted mode is configured as a temporary execution mode."
+                    if settings.uses_codex_chat_assisted_execution
+                    else "Direct provider mode is configured for execution."
+                ),
             ],
         },
         indent=2,
@@ -339,6 +354,49 @@ def google_oauth_login_command(args: argparse.Namespace, settings: Settings) -> 
     return 0
 
 
+def codex_job_list_command(args: argparse.Namespace) -> int:
+    ensure_directories()
+    statuses = {item.strip() for item in (args.statuses.split(",") if args.statuses else []) if item.strip()}
+    jobs = list_codex_jobs(
+        batch_name=args.batch_name,
+        statuses=statuses or None,
+        limit=args.limit,
+    )
+    print(json.dumps([asdict(job) for job in jobs], indent=2))
+    return 0
+
+
+def codex_job_claim_next_command(args: argparse.Namespace) -> int:
+    ensure_directories()
+    job = claim_next_codex_job(args.worker_id)
+    if job is None:
+        print(json.dumps({"job": None, "message": "No pending Codex jobs."}, indent=2))
+        return 0
+    print(json.dumps(asdict(job), indent=2))
+    return 0
+
+
+def codex_job_show_command(args: argparse.Namespace) -> int:
+    ensure_directories()
+    job = load_codex_job(args.job_id)
+    print(json.dumps(asdict(job), indent=2))
+    return 0
+
+
+def codex_job_update_command(args: argparse.Namespace) -> int:
+    ensure_directories()
+    result_payload = json.loads(args.result_json) if args.result_json else None
+    job = update_codex_job(
+        args.job_id,
+        status=args.status,
+        worker_id=args.worker_id,
+        message=args.message,
+        result=result_payload,
+    )
+    print(json.dumps(asdict(job), indent=2))
+    return 0
+
+
 def _resolve_settings_for_csv(csv_path: Path, settings: Settings) -> Settings:
     schema_path = csv_path.parent / "schema_config.json"
     if schema_path.exists():
@@ -373,6 +431,20 @@ def build_parser() -> argparse.ArgumentParser:
     oauth_login.add_argument("--client-secret", help="Optional path to the OAuth client secret JSON.")
     oauth_login.add_argument("--no-browser", action="store_true", help="Print the authorization URL instead of opening a browser automatically.")
     oauth_login.add_argument("--port", type=int, default=8787, help="Local callback port for the OAuth flow. Default: 8787.")
+    codex_job_list = subparsers.add_parser("codex-job-list", help="List Codex-assisted UI jobs from the local queue.")
+    codex_job_list.add_argument("--batch-name", help="Optional batch name filter.")
+    codex_job_list.add_argument("--statuses", help="Optional comma-separated status filter.")
+    codex_job_list.add_argument("--limit", type=int, help="Optional maximum number of jobs to print.")
+    codex_job_claim = subparsers.add_parser("codex-job-claim-next", help="Claim the next pending Codex-assisted UI job.")
+    codex_job_claim.add_argument("--worker-id", required=True, help="Worker identifier that is claiming the job.")
+    codex_job_show = subparsers.add_parser("codex-job-show", help="Show one Codex-assisted UI job.")
+    codex_job_show.add_argument("--job-id", required=True, help="Job id to inspect.")
+    codex_job_update = subparsers.add_parser("codex-job-update", help="Update one Codex-assisted UI job.")
+    codex_job_update.add_argument("--job-id", required=True, help="Job id to update.")
+    codex_job_update.add_argument("--status", choices=["pending", "claimed", "running", "completed", "failed", "cancelled"], required=True)
+    codex_job_update.add_argument("--worker-id", help="Optional worker id to store on the job.")
+    codex_job_update.add_argument("--message", help="Optional status message.")
+    codex_job_update.add_argument("--result-json", help="Optional JSON payload to store as the job result.")
     subparsers.add_parser("run-once", help="Process all currently pending documents one time.")
     subparsers.add_parser("watch", help="Continuously monitor input_documents for new files.")
     ui_parser = subparsers.add_parser("ui", help="Start the local workspace UI.")
@@ -412,6 +484,14 @@ def main() -> int:
         return sync_sheet_command(args, settings)
     if args.command == "google-oauth-login":
         return google_oauth_login_command(args, settings)
+    if args.command == "codex-job-list":
+        return codex_job_list_command(args)
+    if args.command == "codex-job-claim-next":
+        return codex_job_claim_next_command(args)
+    if args.command == "codex-job-show":
+        return codex_job_show_command(args)
+    if args.command == "codex-job-update":
+        return codex_job_update_command(args)
     if args.command == "run-once":
         return run_once_command(settings)
     if args.command == "watch":

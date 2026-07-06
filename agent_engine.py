@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass
 from typing import Any
 
-from pydantic import BaseModel, Field, create_model
+from pydantic import BaseModel, Field, create_model, field_validator
 
 from config import Settings, get_settings
 from parsers.base import ParsedDocument
@@ -44,6 +45,104 @@ class PreExtractionUnderstanding(BaseModel):
         default_factory=list,
         description="Notes about what domains, topics, and row items must be covered so source content is not missed.",
     )
+
+    @field_validator(
+        "layout_analysis",
+        "row_formation_logic",
+        "exclusion_rules",
+        "coverage_expectations",
+        mode="before",
+    )
+    @classmethod
+    def _normalize_string_list_fields(cls, value: Any) -> list[str]:
+        return _normalize_to_string_list(value)
+
+    @field_validator("column_derivations", mode="before")
+    @classmethod
+    def _normalize_column_derivations(cls, value: Any) -> dict[str, str]:
+        if value is None:
+            return {}
+        if isinstance(value, dict):
+            return {str(key): _stringify_structured_value(item) for key, item in value.items()}
+        if isinstance(value, list):
+            normalized: dict[str, str] = {}
+            for index, item in enumerate(value, start=1):
+                normalized[f"field_{index}"] = _stringify_structured_value(item)
+            return normalized
+        if isinstance(value, str):
+            return {"notes": value.strip()}
+        return {"notes": _stringify_structured_value(value)}
+
+    @field_validator("representative_row", mode="before")
+    @classmethod
+    def _normalize_representative_row(cls, value: Any) -> dict[str, str]:
+        if value is None:
+            return {}
+        if isinstance(value, dict):
+            return {str(key): _stringify_structured_value(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return {f"field_{index}": _stringify_structured_value(item) for index, item in enumerate(value, start=1)}
+        if isinstance(value, str):
+            return {"notes": value.strip()}
+        return {"notes": _stringify_structured_value(value)}
+
+
+def _normalize_to_string_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        text = value.strip()
+        return [text] if text else []
+    if isinstance(value, dict):
+        normalized_items: list[str] = []
+        for key, item in value.items():
+            rendered = _stringify_structured_value(item)
+            normalized_items.append(f"{key}: {rendered}" if rendered else str(key))
+        return [item for item in normalized_items if item.strip()]
+    if isinstance(value, list):
+        normalized_items: list[str] = []
+        for item in value:
+            if isinstance(item, str):
+                text = item.strip()
+                if text:
+                    normalized_items.append(text)
+                continue
+            if isinstance(item, dict):
+                normalized_items.extend(_normalize_to_string_list(item))
+                continue
+            text = _stringify_structured_value(item)
+            if text:
+                normalized_items.append(text)
+        return normalized_items
+    text = _stringify_structured_value(value)
+    return [text] if text else []
+
+
+def _stringify_structured_value(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, dict):
+        parts = [f"{key}: {_stringify_structured_value(item)}" for key, item in value.items()]
+        return "; ".join(part for part in parts if part.strip())
+    if isinstance(value, list):
+        parts = [_stringify_structured_value(item) for item in value]
+        return "; ".join(part for part in parts if part.strip())
+    return str(value).strip()
+
+
+def _strip_json_code_fence(content: str) -> str:
+    text = content.strip()
+    fenced = re.search(r"```(?:json)?\s*(.*?)\s*```", text, re.DOTALL)
+    if fenced:
+        return fenced.group(1).strip()
+    if text.startswith("{") or text.startswith("["):
+        return text
+    first_object = re.search(r"(\{.*\}|\[.*\])", text, re.DOTALL)
+    if first_object:
+        return first_object.group(1).strip()
+    return text
 
 
 def _extract_message_text(response: Any) -> str:
@@ -154,7 +253,9 @@ class ExtractionEngine:
             "You are an adaptive data transformation agent. "
             "Do not use static assumptions about layout. "
             "Before extraction, inspect the unique source structure together with the sample CSV contract. "
-            "This step is only for understanding how rows are formed and how each column is derived."
+            "This step is only for understanding how rows are formed and how each column is derived. "
+            "Do not hardcode subject-specific assumptions. "
+            "Infer the meaning of each output column for this subject from the approved sample contract first, then from the source structure."
         )
 
         user_prompt = f"""
@@ -174,12 +275,15 @@ Validation feedback:
 
 Instructions:
 1. Analyze this document's unique structure and summarize it in layout_analysis.
-2. Explain in row_formation_logic how one complete output row is formed from this source and how that row pattern repeats across the source.
-3. For each schema field, explain in column_derivations what data it should contain and how it is derived from the source.
-4. Build representative_row as a row-shaped preview showing what one complete row would contain under this sample contract.
-5. List exclusion_rules describing what source content must be rejected from output rows.
-6. In coverage_expectations, identify what domains, topics, sections, or repeated row items must be captured so valid source content is not missed.
-7. Do not perform final cited extraction yet. This step is only for understanding the source-to-row mapping.
+2. First infer what each output column means for this subject under the approved sample contract. Do not assume the same subject/domain/topic/grade pattern used by a different subject.
+3. Explain in row_formation_logic how one complete output row is formed from this source and how that row pattern repeats across the source.
+4. For each schema field, explain in column_derivations what data it should contain and how it is derived from the source.
+5. Determine whether values such as source, subject, domain, topic, grade_level, display_grade, and grade_number are document-level, section-level, or row-level for this specific subject and source.
+6. If the approved sample implies canonical public source links, merged topic paths, row-specific stage labels, or transformed display codes, note that explicitly when supported by the source.
+7. Build representative_row as a row-shaped preview showing what one complete row would contain under this sample contract.
+8. List exclusion_rules describing what source content must be rejected from output rows.
+9. In coverage_expectations, identify what domains, topics, sections, or repeated row items must be captured so valid source content is not missed.
+10. Do not perform final cited extraction yet. This step is only for understanding the source-to-row mapping.
 
 Source markdown:
 {parsed_document.markdown}
@@ -215,6 +319,7 @@ Source markdown:
             "Do not use static assumptions about layout. "
             "Use the pre-extraction understanding artifact as the required plan before mapping content into the provided schema. "
             "The provided sample CSV contract defines the transformation rules and output style; follow it strictly. "
+            "Infer subject-specific column meaning from the sample contract and source rather than hardcoding one hierarchy interpretation across subjects. "
             "Description fields must preserve source meaning completely, without truncation, cross-row merges, "
             "neighbor contamination, or forced flattening when multiline structure is meaningful. "
             "Preserve mathematical symbols, equations, radicals, superscripts, subscripts, chemistry notation, "
@@ -254,12 +359,14 @@ Validation feedback:
 Instructions:
 1. Use the pre-extraction understanding artifact before extracting any values.
 2. Build a temporary field anchoring plan explaining where each schema field appears in this specific layout.
-3. Extract every valid output row from the source, not just one row.
-4. Ensure complete source coverage for all valid domains, topics, and descriptions that match the sample contract.
-5. Return payload_rows in source reading order with one object per output row.
-6. If the approved sample supports merged topic cells and one standard genuinely spans multiple topics, merge those topic names into one topic field using ` | ` rather than duplicating the row only for topic labels.
-7. If the approved sample supports prefixed or formed display codes and the same raw display standard code repeats, disambiguate it with a short domain code or topic code prefix and a dot when that is needed to keep `Display standard code` unique.
-8. If the source contradicts the draft representative_row, follow the source while preserving the sample contract.
+3. Apply the sample-derived meaning of each column consistently across all rows. Once you infer what source, subject, domain, topic, grade_level, display_grade, and grade_number mean for this subject, do not drift to a different interpretation.
+4. Extract every valid output row from the source, not just one row.
+5. Ensure complete source coverage for all valid domains, topics, and descriptions that match the sample contract.
+6. Return payload_rows in source reading order with one object per output row.
+7. If the approved sample supports canonical public source links, use those links when they are identifiable from the source documents or staging context instead of local file names.
+8. If the approved sample supports merged topic cells and one standard genuinely spans multiple topics, merge those topic names into one topic field using ` | ` rather than duplicating the row only for topic labels.
+9. If the approved sample supports prefixed or formed display codes and the same raw display standard code repeats, disambiguate it with a short domain code or topic code prefix and a dot when that is needed to keep `Display standard code` unique.
+10. If the source contradicts the draft representative_row, follow the source while preserving the sample contract.
 
 Source markdown:
 {parsed_document.markdown}
@@ -310,7 +417,7 @@ Source markdown:
             ) from exc
         content = _extract_message_text(response)
         try:
-            payload = json.loads(content)
+            payload = json.loads(_strip_json_code_fence(content))
         except json.JSONDecodeError as exc:
             raise GeminiClientError(f"Portkey extractor returned invalid JSON: {exc}") from exc
         return response_model.model_validate(payload)

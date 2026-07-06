@@ -69,7 +69,13 @@ Common fields:
 - `ANTHROPIC_API_KEY`
 - `EXTRACTOR_MODEL`
 - `CRITIC_MODEL`
+- `EXECUTION_MODE`
 - `SCHEMA_CONFIG_PATH`
+
+Supported execution modes:
+
+- `direct_provider`
+- `codex_chat_assisted`
 
 For local standalone CLI runs, you do not have to use `PORTKEY_API_KEY`.
 
@@ -91,7 +97,30 @@ GEMINI_API_KEY=your_gemini_key
 OPENAI_API_KEY=your_openai_key
 CRITIC_PROVIDER=openai
 CRITIC_MODEL=gpt-5.5
+EXECUTION_MODE=direct_provider
 ```
+
+## Execution Modes
+
+The repository now exposes a temporary execution-mode switch so the UI can stay stable while the execution surface changes.
+
+`direct_provider`
+
+- current default mode
+- the local Python backend makes extraction, review, and critic model calls directly through configured providers
+- suitable for standalone CLI or UI operation when provider credentials are configured
+
+`codex_chat_assisted`
+
+- temporary transition mode
+- intended for periods where Codex chat is the practical execution surface, while the UI remains the intake, review, and artifact surface
+- useful when you want to preserve the current UI shape and later return to direct-provider execution cleanly
+
+Important current limitation:
+
+- setting `EXECUTION_MODE=codex_chat_assisted` does not magically make the local Python UI backend call Codex app models by itself
+- it is a configuration contract and operating-mode signal for the workspace, status outputs, and future queue-worker integration
+- the visible UI can remain the same while you temporarily use Codex chat as the real execution surface
 
 ### Using The Agent Through Codex Chat
 
@@ -110,6 +139,7 @@ Short version:
 
 - Codex chat-based usage: Portkey key is not required from you
 - standalone CLI usage: Portkey is optional, but some provider configuration is still required with the current implementation
+- temporary `codex_chat_assisted` mode: preserves the current UI shape while treating Codex chat as the execution surface for the time being
 
 Google Sheets related configuration is optional and only needed if you plan to use manual sheet sync.
 

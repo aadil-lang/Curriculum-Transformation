@@ -130,7 +130,9 @@ class TransformationReviewer:
             "Review extracted CSV rows against the source document, the sample CSV contract, and the row-formation plan. "
             "Apply only minimal supported fixes. "
             "Do not invent missing facts. "
-            "Preserve citations, symbols, multilingual content, multiline structure, and row boundaries."
+            "Preserve citations, symbols, multilingual content, multiline structure, and row boundaries. "
+            "Do not hardcode one hierarchy interpretation across subjects; preserve the subject-specific column meanings inferred from the sample contract and source. "
+            "Return your response as a single JSON object."
         )
 
         user_prompt = f"""
@@ -148,7 +150,10 @@ Current transformed row:
 
 Review goals:
 - check whether the transformation matches the source and the sample contract
+- check whether subject, domain, topic, grade_level, display_grade, grade_number, and source follow the sample-derived column semantics for this subject rather than a generic cross-subject assumption
 - fix incorrect placement, formatting, merged/split text issues, or minor transformation errors when the source supports a correction
+- if the approved sample pattern implies a canonical public source link and the source supports identifying it, prefer that canonical link over a local staged file name
+- if the approved sample pattern implies row-specific stage or learner-band values, do not collapse them into one document-wide grade label
 - if grade_number is a numeric range such as `9-12`, normalize it to a comma-separated sequence such as `9,10,11,12`, with no spaces after commas
 - if the approved sample supports merged topic cells and one standard genuinely applies to multiple topics, merge those topic names into one topic field using ` | ` rather than duplicating the row only for topic labels
 - ensure `Display standard code` stays unique within the CSV; if the same raw code repeats across multiple domains or sections, add a short domain code prefix when the source structure supports that disambiguation

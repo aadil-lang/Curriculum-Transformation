@@ -2,6 +2,25 @@
 
 Use this prompt when preparing a sample CSV for curriculum or standards extraction.
 
+## Generalization Principle
+
+Do not hardcode subject-specific assumptions such as:
+
+- what `subject` must contain
+- whether `domain` is the syllabus name, strand name, or course family
+- whether `topic` is a single heading or a merged topic path
+- whether `grade_level` should be `Middle School`, `High School`, `Senior Years`, or another band
+- whether `display_grade` and `grade_number` are document-level or row-level values
+- whether `source` should be a local file name, canonical public URL, PDF URL, or row-specific webpage URL
+
+Instead, infer the column semantics for the current run in this order:
+
+1. approved sample CSV rows or sample contract
+2. source document hierarchy and repeated row structure
+3. stable global output-quality rules
+
+The sample contract defines how columns should behave for this subject. The source document defines which concrete values belong in those columns for this run.
+
 ## Reusable Prompt
 
 Create a sample CSV using this exact column intent:
@@ -48,11 +67,38 @@ Fill the columns as follows:
 - Do not fill columns with code labels, cluster numbers, or structural markers when a real heading name is available.
 - If a parent heading and child bullet together form the real meaning of a row, merge them into one description rather than leaving the child fragment unsupported.
 
+## Column-Semantics Inference Rules
+
+Before drafting sample rows or running full extraction, determine the meaning of every output column for the current subject and source.
+
+- Infer `source` format from the approved sample when available. Prefer canonical public source links over local file names when the public source can be identified reliably from the staged source or document metadata.
+- Infer `grade_level` from the sample's schooling-band style first, then from the source's official banding terminology.
+- Infer `display_grade` from the row-level or section-level learner/stage label that the sample pattern expects. Do not force one document-wide value if the source clearly contains row-specific stage bands such as `Stage 4`, `Stage 5`, and `Life Skills`.
+- Infer `grade_number` from the sample's normalization style. If the sample keeps stage labels, keep stage labels. If the sample expands grade ranges, expand them consistently.
+- Infer `subject` from the approved sample's scope. In some subjects it may be the parent learning area; in others it may be the course title itself. Do not assume one universal pattern.
+- Infer `domain` from the approved sample's placement pattern. It may hold the syllabus/framework title, a strand family, a discipline name, or another meaningful grouping. Do not force `domain` to always be the same hierarchy level across subjects.
+- Infer `topic` from the approved sample's placement pattern. It may be a single heading, an organizer, a merged path, or a focus-area path joined with ` | `.
+- Infer whether `Display standard code` should be copied exactly from the source, slightly normalized, or synthetically formed according to the approved sample style.
+- Infer whether `Standard code` should remain blank, mirror another code, or carry a second code system only when the user or sample contract requires that behavior.
+- Infer whether optional hierarchy columns should stay blank or be populated from the source only when the approved sample contract supports those levels.
+
+When the sample and source disagree about hierarchy labels, prioritize preserving the approved sample's column semantics while still using source-supported content.
+
 ## Mapping Guidance By Pattern
 
 - If the source has `subject > domain/discipline > strand/topic > coded outcomes`, map those directly to `subject`, `domain`, and `topic`.
 - If the source is a single framework document with named domains and named cluster headings, use the domain name in `domain` and the cluster heading text in `topic`.
 - If the source is a course with units and outcomes, use the course or framework name in `domain` and the unit heading in `topic`.
+
+## Prompt Workflow
+
+For every subject, perform the prompt reasoning in this order:
+
+1. Read the approved sample contract or approved sample rows and infer what each output column means for this subject.
+2. Read the source and identify the repeated row unit, hierarchy labels, and noise to exclude.
+3. Write a source-to-row mapping that explains how one complete row is formed.
+4. Draft or extract rows only after that mapping is established.
+5. Review whether the resulting rows still match the sample-derived column semantics.
 
 ## Output Quality Rules
 
@@ -68,6 +114,7 @@ Fill the columns as follows:
 - If the source or sample is in a language other than English, preserve the original language, script, accents, and diacritics exactly where possible. Do not translate, normalize, or anglicize the text unless the user explicitly asks for translation.
 - Do not include page headers, footers, page numbers, appendix labels, or continuation fragments unless they are part of the actual standard text.
 - Use the sample CSV contract consistently across all rows.
+- Use sample-derived column meaning consistently across all rows. Once `subject`, `domain`, `topic`, `grade_level`, `display_grade`, and `grade_number` semantics have been inferred for the subject, do not drift to a different interpretation in later rows.
 - Do not move content into the wrong column. Domain, topic, description, and display-code placement must remain aligned with the approved sample.
 - Do not truncate, flatten incorrectly, contaminate with neighboring rows, or silently drop meaningful sub-parts from descriptions.
 - If a column is not clearly supported by the source and the user has not asked for a derived value, leave it blank.

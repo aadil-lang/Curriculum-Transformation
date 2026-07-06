@@ -17,56 +17,108 @@
         </p>
       </header>
 
+      <section class="workspace-strip">
+        <div class="summary-card">
+          <span class="summary-label">Default Schema</span>
+          <strong id="workspaceSchema">Loading…</strong>
+        </div>
+        <div class="summary-card">
+          <span class="summary-label">Batches</span>
+          <strong id="workspaceBatches">0</strong>
+        </div>
+        <div class="summary-card">
+          <span class="summary-label">Input Docs</span>
+          <strong id="workspaceInputs">0</strong>
+        </div>
+        <div class="summary-card">
+          <span class="summary-label">Sheets Sync</span>
+          <strong id="workspaceSheets">Unknown</strong>
+        </div>
+      </section>
+
       <main class="layout">
-        <section class="panel panel-form">
-          <div class="section-head">
-            <h2>Batch Setup</h2>
-            <span id="batchBadge" class="badge">Idle</span>
-          </div>
+        <div class="layout-top">
+          <section class="panel panel-form">
+            <div class="section-head">
+              <h2>Batch Setup</h2>
+              <span id="batchBadge" class="badge">Idle</span>
+            </div>
 
-          <label class="field">
-            <span>Batch name</span>
-            <input id="batchName" type="text" placeholder="invoice_batch">
-          </label>
+            <label class="field">
+              <span>Batch name</span>
+              <input id="batchName" type="text" placeholder="invoice_batch">
+            </label>
 
-          <label class="field">
-            <span>Instructions</span>
-            <textarea id="instructions" rows="8" placeholder="Describe the target CSV columns and any extraction rules."></textarea>
-          </label>
+            <label class="field">
+              <span>Instructions</span>
+              <textarea id="instructions" rows="6" placeholder="Describe the target CSV columns and any extraction rules."></textarea>
+            </label>
 
-          <label class="field file-field">
-            <span>Source documents</span>
-            <input id="documentFiles" type="file" multiple accept=".pdf,.docx,.txt,.url,.webloc">
-          </label>
-          <div id="documentList" class="chip-list"></div>
+            <label class="field file-field">
+              <span>Source documents</span>
+              <input id="documentFiles" type="file" multiple accept=".pdf,.docx,.txt,.url,.webloc">
+            </label>
+            <div id="documentList" class="chip-list"></div>
 
-          <label class="field file-field">
-            <span>Optional sample CSV</span>
-            <input id="sampleCsvFile" type="file" accept=".csv">
-          </label>
-          <div id="sampleCsvLabel" class="inline-note">No sample CSV selected yet.</div>
+            <label class="field file-field">
+              <span>Optional sample CSV</span>
+              <input id="sampleCsvFile" type="file" accept=".csv">
+            </label>
+            <div id="sampleCsvLabel" class="inline-note">No sample CSV selected yet.</div>
 
-          <div class="button-row">
-            <button id="generateDraftButton" class="primary">Generate Draft Sample CSV</button>
-            <button id="runExtractionButton">Run Extraction</button>
-          </div>
+            <div class="button-row">
+              <button id="generateDraftButton" class="primary">Generate Draft Sample CSV</button>
+              <button id="runExtractionButton">Run Extraction</button>
+            </div>
 
-          <p class="hint">
-            If you do not provide a sample CSV, the app creates one first and waits for your approval before extraction.
-          </p>
-        </section>
+            <p class="hint">
+              If you do not provide a sample CSV, the app creates one first and waits for your approval before extraction.
+            </p>
 
-        <section class="panel panel-editor">
-          <div class="section-head">
-            <h2>Draft / Approved Sample CSV</h2>
-            <button id="refreshButton" class="ghost">Refresh Batch</button>
-          </div>
-          <textarea id="sampleCsvEditor" rows="18" placeholder="The generated sample CSV will appear here. You can edit it before approval."></textarea>
-          <div class="button-row">
-            <button id="approveRunButton" class="accent" disabled>Approve Draft and Run Extraction</button>
-          </div>
-          <pre id="statusBox" class="status-box">Waiting for a batch.</pre>
-        </section>
+            <div class="workflow-card">
+              <h3>Workflow</h3>
+              <ol class="workflow-list">
+                <li>Upload source documents and write instructions.</li>
+                <li>Generate a draft sample CSV.</li>
+                <li>Review or edit the sample CSV.</li>
+                <li>Approve and run extraction.</li>
+                <li>Audit and optionally sync from the batch actions panel.</li>
+              </ol>
+            </div>
+          </section>
+
+          <section class="panel panel-preview">
+            <div class="section-head sample-preview-panel-head">
+              <h2>Sample Preview</h2>
+              <div class="preview-head-actions">
+                <span class="inline-note">Spreadsheet view</span>
+                <button id="refreshButton" class="ghost">Refresh Batch</button>
+              </div>
+            </div>
+            <div class="sample-preview-card">
+              <div class="sheet-preview-shell">
+                <div class="sheet-toolbar">
+                  <div id="samplePreviewTitle" class="sheet-title">Sample-S.csv</div>
+                  <div class="sheet-toolbar-actions">
+                    <span class="sheet-pill">CSV import</span>
+                    <span id="samplePreviewMeta" class="sheet-toolbar-meta">No sample preview yet.</span>
+                  </div>
+                </div>
+                <div class="sheet-formula-bar">
+                  <div id="samplePreviewCellRef" class="sheet-cell-ref">A1</div>
+                  <div class="sheet-fx">fx</div>
+                  <div id="samplePreviewFormula" class="sheet-formula-value">No sample preview yet.</div>
+                </div>
+                <div id="samplePreviewTableWrap" class="sheet-grid empty-state">No sample preview yet.</div>
+              </div>
+            </div>
+            <div class="button-row preview-action-row">
+              <button id="downloadSampleButton" class="ghost" disabled>Download Sample CSV</button>
+              <button id="approveRunButton" class="accent" disabled>Approve Draft and Run Extraction</button>
+            </div>
+            <pre id="statusBox" class="status-inline">Waiting for a batch.</pre>
+          </section>
+        </div>
 
         <section class="panel panel-output">
           <div class="section-head">
@@ -82,10 +134,27 @@
               <h3>Final CSV</h3>
               <pre id="outputBox">No output yet.</pre>
             </div>
+            <div class="output-card">
+              <h3>Batch Actions</h3>
+              <div class="action-stack">
+                <button id="auditBatchButton" class="secondary" disabled>Audit Extracted CSV</button>
+                <button id="syncFinalButton" class="secondary" disabled>Sync Final CSV to Sheets</button>
+                <button id="syncSampleButton" class="ghost" disabled>Sync Approved Sample to Sheets</button>
+              </div>
+              <pre id="actionBox">No batch action run yet.</pre>
+            </div>
+            <div class="output-card">
+              <h3>Batch Metadata</h3>
+              <pre id="batchMetaBox">No batch loaded.</pre>
+            </div>
           </div>
           <div class="output-card output-wide">
             <h3>Manual Review / State</h3>
             <pre id="manualReviewBox">No manual review entries.</pre>
+          </div>
+          <div class="output-card output-wide">
+            <h3>Latest Audit Report</h3>
+            <pre id="auditReportBox">No audit report yet.</pre>
           </div>
         </section>
 
@@ -94,6 +163,12 @@
           <div id="batchList" class="batch-list"></div>
         </aside>
       </main>
+
+      <div class="hidden-support">
+        <textarea id="sampleCsvEditor" rows="12" placeholder="The generated sample CSV will appear here. You can edit it before approval."></textarea>
+        <code id="samplePathBox">No sample yet.</code>
+        <code id="schemaPathBox">No schema yet.</code>
+      </div>
     </div>
 
     <script src="/app.js" defer></script>
