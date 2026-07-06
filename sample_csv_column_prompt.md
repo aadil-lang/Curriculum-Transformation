@@ -57,12 +57,19 @@ Fill the columns as follows:
 ## Output Quality Rules
 
 - Preserve capitalization and wording faithfully, except for minor cleanup of OCR or line-break noise.
+- Ensure complete coverage of all valid source-supported rows that match the approved sample contract. Do not miss a supported domain, topic, description, or standard-level row.
+- Do not create duplicate rows for the same source-supported standard unless the approved sample contract clearly requires that structure.
 - If a description spans multiple lines in the source, preserve all of its content in the CSV cell. Do not drop later lines just to make the row shorter.
 - When merging parent and child text, preserve the source meaning and relationship clearly. Do not merge unrelated sibling items together.
+- Keep `Display standard code` unique across the full CSV. Do not allow duplicate `Display standard code` values in the final output.
+- If the approved sample supports prefixed or formed display codes, use that same sample-aligned disambiguation style consistently when a repeated raw code must be made unique.
+- If the approved sample supports merged topic cells, use the same sample-aligned `topic` merge style consistently, including the ` | ` separator.
 - Preserve mathematical symbols and notation exactly where possible, including operators, inequalities, exponents, subscripts, radicals, fractions, set notation, Greek letters, and other subject-specific symbols. Do not simplify or replace them with incorrect plain-text approximations.
 - If the source or sample is in a language other than English, preserve the original language, script, accents, and diacritics exactly where possible. Do not translate, normalize, or anglicize the text unless the user explicitly asks for translation.
 - Do not include page headers, footers, page numbers, appendix labels, or continuation fragments unless they are part of the actual standard text.
 - Use the sample CSV contract consistently across all rows.
+- Do not move content into the wrong column. Domain, topic, description, and display-code placement must remain aligned with the approved sample.
+- Do not truncate, flatten incorrectly, contaminate with neighboring rows, or silently drop meaningful sub-parts from descriptions.
 - If a column is not clearly supported by the source and the user has not asked for a derived value, leave it blank.
 - If the subject is compiled from multiple links, keep all other column rules the same and only vary `source` row by row as needed.
 

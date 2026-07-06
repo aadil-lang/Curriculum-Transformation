@@ -648,6 +648,7 @@ def _derive_sample_contract(headers: list[str], rows: list[dict[str, str]]) -> S
         field_placement_rules=_infer_field_placement_rules(normalized_headers, exemplar_rows),
         disallowed_output_content=_infer_disallowed_output_content(headers, exemplar_rows),
         noise_rejection_rules=_infer_noise_rejection_rules(headers),
+        output_quality_rules=_infer_output_quality_rules(headers, exemplar_rows),
         sample_rows=sample_rows,
     )
     return contract
@@ -896,6 +897,35 @@ def _infer_noise_rejection_rules(headers: list[str]) -> list[str]:
     lowered_headers = {header.strip().lower() for header in headers}
     if "description" in lowered_headers:
         rules.append("Reject description values contaminated by neighboring row text or document chrome.")
+    return rules
+
+
+def _infer_output_quality_rules(headers: list[str], rows: list[dict[str, str]]) -> list[str]:
+    lowered_headers = {header.strip().lower() for header in headers}
+    rules = [
+        "Ensure complete coverage of all valid source-supported rows that match the approved sample contract. Do not miss a supported domain, topic, description, or standard-level row.",
+        "Do not create duplicate rows for the same source-supported standard unless the approved sample contract clearly requires that structure.",
+        "Use the approved sample CSV contract consistently across all rows.",
+        "Do not move content into the wrong column. Domain, topic, description, and display-code placement must remain aligned with the approved sample.",
+        "Do not truncate, flatten incorrectly, contaminate with neighboring rows, or silently drop meaningful sub-parts from descriptions.",
+    ]
+    if "display standard code" in lowered_headers:
+        rules.append("Keep Display standard code unique across the full CSV. Do not allow duplicate Display standard code values in the final output.")
+        rules.append(
+            "If the approved sample supports prefixed or formed display codes, use that same sample-aligned disambiguation style consistently when a repeated raw code must be made unique."
+        )
+    if "topic" in lowered_headers:
+        rules.append(
+            "If the approved sample supports merged topic cells, use the same sample-aligned topic merge style consistently, including the ' | ' separator."
+        )
+    if any((row.get("description", "") or "").strip() for row in rows):
+        rules.append("Preserve capitalization and wording faithfully, except for minor cleanup of OCR or line-break noise.")
+        rules.append(
+            "If a description spans multiple lines in the source, preserve all of its content in the CSV cell. Do not drop later lines just to make the row shorter."
+        )
+        rules.append(
+            "When merging parent and child text, preserve the source meaning and relationship clearly. Do not merge unrelated sibling items together."
+        )
     return rules
 
 

@@ -40,6 +40,7 @@ class SampleTransformationContract(BaseModel):
     field_placement_rules: dict[str, str] = Field(default_factory=dict)
     disallowed_output_content: list[str] = Field(default_factory=list)
     noise_rejection_rules: list[str] = Field(default_factory=list)
+    output_quality_rules: list[str] = Field(default_factory=list)
     sample_rows: list[dict[str, str]] = Field(default_factory=list)
 
 
