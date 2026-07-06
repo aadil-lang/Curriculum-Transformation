@@ -71,6 +71,46 @@ Common fields:
 - `CRITIC_MODEL`
 - `SCHEMA_CONFIG_PATH`
 
+For local standalone CLI runs, you do not have to use `PORTKEY_API_KEY`.
+
+Direct local-provider mode is supported by leaving `PORTKEY_API_KEY` blank and setting provider keys directly instead.
+
+Current practical setup options are:
+
+- extractor through `GEMINI_API_KEY`
+- critic/review through `OPENAI_API_KEY`
+- critic/review through `ANTHROPIC_API_KEY`
+
+If you want to run the critic side on OpenAI or Codex-family models locally, configure `OPENAI_API_KEY`, set `CRITIC_PROVIDER=openai`, and choose the model in `CRITIC_MODEL`. In other words, Portkey is optional for local use; it is a gateway option, not a requirement.
+
+Example local `.env` direction without Portkey:
+
+```env
+PORTKEY_API_KEY=
+GEMINI_API_KEY=your_gemini_key
+OPENAI_API_KEY=your_openai_key
+CRITIC_PROVIDER=openai
+CRITIC_MODEL=gpt-5.5
+```
+
+### Using The Agent Through Codex Chat
+
+If you are using this repository inside Codex chat as a chat-based agent workflow, you may not need to configure `PORTKEY_API_KEY` yourself.
+
+In that mode:
+
+- Codex chat is the control surface
+- you can give natural-language extraction requests directly in chat
+- you can upload files or paste URLs in chat
+- manual Portkey configuration is not required just to operate the workflow through Codex chat
+
+This is different from running the standalone CLI yourself with `python main.py ...`.
+
+Short version:
+
+- Codex chat-based usage: Portkey key is not required from you
+- standalone CLI usage: Portkey is optional, but some provider configuration is still required with the current implementation
+
 Google Sheets related configuration is optional and only needed if you plan to use manual sheet sync.
 
 ## Main Commands
