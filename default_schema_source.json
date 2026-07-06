@@ -1,0 +1,6 @@
+{
+  "sample_csv_path": "/Users/eventlaptop/Downloads/NSW Curriculum Tracker - Sheet13.csv",
+  "workspace_copy_path": "/Users/eventlaptop/Documents/Data Transformation Agent/default_sample_schema.csv",
+  "refined_from_chat_example": true,
+  "notes": "Workspace default schema was refined using an approved chat-provided NSW sample row, including the czi_standard_code column and exact output column labels."
+}

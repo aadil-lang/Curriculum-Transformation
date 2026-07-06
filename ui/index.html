@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Document to CSV Studio</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <div class="page-shell">
+      <header class="hero">
+        <p class="eyebrow">Codex Workspace UI</p>
+        <h1>Document to CSV Studio</h1>
+        <p class="lede">
+          Upload documents, draft a sample CSV from your instructions, approve the template,
+          then run full extraction without leaving this workspace.
+        </p>
+      </header>
+
+      <main class="layout">
+        <section class="panel panel-form">
+          <div class="section-head">
+            <h2>Batch Setup</h2>
+            <span id="batchBadge" class="badge">Idle</span>
+          </div>
+
+          <label class="field">
+            <span>Batch name</span>
+            <input id="batchName" type="text" placeholder="invoice_batch">
+          </label>
+
+          <label class="field">
+            <span>Instructions</span>
+            <textarea id="instructions" rows="8" placeholder="Describe the target CSV columns and any extraction rules."></textarea>
+          </label>
+
+          <label class="field file-field">
+            <span>Source documents</span>
+            <input id="documentFiles" type="file" multiple accept=".pdf,.docx,.txt,.url,.webloc">
+          </label>
+          <div id="documentList" class="chip-list"></div>
+
+          <label class="field file-field">
+            <span>Optional sample CSV</span>
+            <input id="sampleCsvFile" type="file" accept=".csv">
+          </label>
+          <div id="sampleCsvLabel" class="inline-note">No sample CSV selected yet.</div>
+
+          <div class="button-row">
+            <button id="generateDraftButton" class="primary">Generate Draft Sample CSV</button>
+            <button id="runExtractionButton">Run Extraction</button>
+          </div>
+
+          <p class="hint">
+            If you do not provide a sample CSV, the app creates one first and waits for your approval before extraction.
+          </p>
+        </section>
+
+        <section class="panel panel-editor">
+          <div class="section-head">
+            <h2>Draft / Approved Sample CSV</h2>
+            <button id="refreshButton" class="ghost">Refresh Batch</button>
+          </div>
+          <textarea id="sampleCsvEditor" rows="18" placeholder="The generated sample CSV will appear here. You can edit it before approval."></textarea>
+          <div class="button-row">
+            <button id="approveRunButton" class="accent" disabled>Approve Draft and Run Extraction</button>
+          </div>
+          <pre id="statusBox" class="status-box">Waiting for a batch.</pre>
+        </section>
+
+        <section class="panel panel-output">
+          <div class="section-head">
+            <h2>Outputs</h2>
+            <button id="reloadBatchesButton" class="ghost">Reload History</button>
+          </div>
+          <div class="output-grid">
+            <div class="output-card">
+              <h3>Schema</h3>
+              <pre id="schemaBox">No schema yet.</pre>
+            </div>
+            <div class="output-card">
+              <h3>Final CSV</h3>
+              <pre id="outputBox">No output yet.</pre>
+            </div>
+          </div>
+          <div class="output-card output-wide">
+            <h3>Manual Review / State</h3>
+            <pre id="manualReviewBox">No manual review entries.</pre>
+          </div>
+        </section>
+
+        <aside class="panel panel-sidebar">
+          <h2>Recent Batches</h2>
+          <div id="batchList" class="batch-list"></div>
+        </aside>
+      </main>
+    </div>
+
+    <script src="/app.js" defer></script>
+  </body>
+  </html>

@@ -1,0 +1,32 @@
+{
+  "batches": [
+    {
+      "name": "invoice_batch",
+      "sample_csv": "/absolute/path/to/invoice_template.csv",
+      "input_files": [
+        "/absolute/path/to/invoice_001.pdf",
+        "/absolute/path/to/invoice_002.pdf"
+      ],
+      "output_csv_name": "invoice_batch_output.csv"
+    },
+    {
+      "name": "contract_batch",
+      "sample_csv": "/absolute/path/to/contract_template.csv",
+      "input_files": [
+        "/absolute/path/to/contract_a.docx",
+        "/absolute/path/to/contract_b.pdf"
+      ],
+      "output_csv_name": "contract_batch_output.csv"
+    },
+    {
+      "name": "draft_schema_batch",
+      "instructions": "Create columns for Claim ID, Claim Date, Customer Name, Amount, and Claim Summary.",
+      "infer_schema": true,
+      "draft_only": true,
+      "input_files": [
+        "/absolute/path/to/unknown_layout_1.pdf",
+        "/absolute/path/to/unknown_layout_2.pdf"
+      ]
+    }
+  ]
+}

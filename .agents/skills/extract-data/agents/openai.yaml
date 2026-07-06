@@ -1,0 +1,49 @@
+interface:
+  display_name: "Extract Data"
+  short_description: "Verified document-to-CSV extraction loop"
+  brand_color: "#A63D2F"
+  default_prompt: "Use $extract-data to inspect workspace status, draft a sample CSV when needed, and only append critic-approved rows."
+
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "workspace-filesystem"
+      description: "Reads staged inputs, schema files, and extraction outputs from the Codex workspace."
+    - type: "mcp"
+      value: "workspace-terminal"
+      description: "Runs the parser, extractor, critic, and watcher commands inside the sandbox terminal."
+
+policy:
+  allow_implicit_invocation: true
+
+runtime:
+  trigger_mode: "implicit_on_staged_inputs"
+  watch_paths:
+    - "./input_documents/"
+    - "./output/chat_batches/"
+  entrypoints:
+    parser_web: "./web_scraper.py"
+    parser_pdf: "./pdf_parser.py"
+    extractor: "./agent_engine.py"
+    critic: "./validation/critic.py"
+    pipeline_cli: "./main.py"
+  preferred_commands:
+    draft_sample_csv: "./.venv/bin/python main.py chat-batch --name <batch> --instructions \"...\" --infer-schema"
+    full_extraction: "./.venv/bin/python main.py chat-batch --name <batch> --sample-csv <approved.csv> <files...>"
+    background_watch: "./.venv/bin/python main.py watch"
+
+permissions:
+  filesystem:
+    read:
+      - "./input_documents/"
+      - "./output/"
+      - "./schema_config.json"
+      - "./output/chat_batches/"
+    write:
+      - "./output/"
+      - "./output/chat_batches/"
+      - "./.runtime/"
+  sandbox_terminal:
+    allow_directory_monitoring: true
+    allow_visual_tree_reads: true
+    allow_visual_tree_writes: true

@@ -1,0 +1,216 @@
+{
+  "schema_name": "workspace_default_sample_csv_schema",
+  "description": "Default curriculum extraction schema aligned to the approved NSW sample row shared in chat.",
+  "fields": [
+    {
+      "name": "source",
+      "description": "Source URL or source document identifier for the curriculum record.",
+      "field_type": "string",
+      "required": false,
+      "output_column": "source",
+      "example_value": "https://www.nsw.gov.au/education-and-training/nesa/curriculum/pdhpe/cafs-stage-6-2022"
+    },
+    {
+      "name": "grade_level",
+      "description": "Broad grade band, such as Primary, Middle, or Senior.",
+      "field_type": "string",
+      "required": false,
+      "output_column": "grade_level",
+      "example_value": "Senior"
+    },
+    {
+      "name": "display_grade",
+      "description": "Human-readable grade label shown in the source.",
+      "field_type": "string",
+      "required": false,
+      "output_column": "display_grade",
+      "example_value": "Year 12"
+    },
+    {
+      "name": "grade_number",
+      "description": "Normalized grade designation from the source.",
+      "field_type": "string",
+      "required": false,
+      "output_column": "grade_number",
+      "example_value": "Year 12"
+    },
+    {
+      "name": "subject",
+      "description": "Top-level curriculum subject area.",
+      "field_type": "string",
+      "required": false,
+      "output_column": "Subject",
+      "example_value": "Personal Development, Health and Physical Education (PDHPE)"
+    },
+    {
+      "name": "domain",
+      "description": "Curriculum domain, strand, or syllabus grouping.",
+      "field_type": "string",
+      "required": false,
+      "output_column": "Domain",
+      "example_value": "Community and Family Studies Stage 6 Syllabus (2022)"
+    },
+    {
+      "name": "topic",
+      "description": "Topic or subtopic label if the source identifies one.",
+      "field_type": "string",
+      "required": false,
+      "output_column": "Topic",
+      "example_value": null
+    },
+    {
+      "name": "l3",
+      "description": "Optional hierarchy level 3 label.",
+      "field_type": "string",
+      "required": false,
+      "output_column": "L3",
+      "example_value": null
+    },
+    {
+      "name": "l4",
+      "description": "Optional hierarchy level 4 label.",
+      "field_type": "string",
+      "required": false,
+      "output_column": "L4",
+      "example_value": null
+    },
+    {
+      "name": "l5",
+      "description": "Optional hierarchy level 5 label.",
+      "field_type": "string",
+      "required": false,
+      "output_column": "L5",
+      "example_value": null
+    },
+    {
+      "name": "standard_code",
+      "description": "Canonical curriculum outcome or standard code.",
+      "field_type": "string",
+      "required": false,
+      "output_column": "Standard code",
+      "example_value": "P1.1"
+    },
+    {
+      "name": "display_standard_code",
+      "description": "Display-ready standard code as shown to users in the source.",
+      "field_type": "string",
+      "required": false,
+      "output_column": "Display standard code",
+      "example_value": "P1.1"
+    },
+    {
+      "name": "description",
+      "description": "Descriptive text for the standard, outcome, or curriculum statement.",
+      "field_type": "string",
+      "required": false,
+      "output_column": "description",
+      "example_value": "describes the contribution an individual's experiences, values, attitudes and beliefs make to the development of goals"
+    },
+    {
+      "name": "czi_standard_code",
+      "description": "Optional mapped CZI standard code when available.",
+      "field_type": "string",
+      "required": false,
+      "output_column": "czi_standard_code",
+      "example_value": null
+    }
+  ],
+  "sample_contract": {
+    "column_order": [
+      "source",
+      "grade_level",
+      "display_grade",
+      "grade_number",
+      "Subject",
+      "Domain",
+      "Topic",
+      "L3",
+      "L4",
+      "L5",
+      "Standard code",
+      "Display standard code",
+      "description",
+      "czi_standard_code"
+    ],
+    "required_columns": [
+      "source",
+      "grade_level",
+      "display_grade",
+      "grade_number",
+      "Subject",
+      "Domain",
+      "Topic",
+      "L3",
+      "L4",
+      "L5",
+      "Standard code",
+      "Display standard code",
+      "description",
+      "czi_standard_code"
+    ],
+    "subject_naming": "Preserve the full official subject name exactly as shown in the sample, including parenthetical abbreviations when they appear.",
+    "grade_level_naming": "Use the sample's broad grade-level labels, such as: Senior.",
+    "display_grade_logic": "Render display_grade in the same user-facing style as the sample, such as: Year 12.",
+    "grade_string_logic": "The sample does not define a separate grade_string column. Use the sample's grade representation through the existing grade_number/display_grade fields, such as: Year 12. Do not invent extra grade fields.",
+    "display_standard_code_logic": "Display standard code may either mirror the source notation or be synthetic/transformed. Match the sample's display style for this run (for example: P1.1), rather than assuming it must equal the raw source text.",
+    "source_link_format": "Use a direct absolute source URL in the source column. Preserve the canonical document or page link format shown in the sample, such as: https://www.nsw.gov.au/education-and-training/nesa/curriculum/pdhpe/cafs-stage-6-2022.",
+    "description_style": "Use outcome-style prose rather than notes or commentary. keep the wording in sentence-fragment style starting with lowercase when the source does so. omit a trailing period unless the source clearly includes one.",
+    "description_integrity_rules": [
+      "Do not truncate description text.",
+      "Do not merge text from neighboring rows into the description.",
+      "Do not drop required sub-parts that belong to the same description entry.",
+      "Do not add stray headers, footers, notes, or layout labels into description."
+    ],
+    "description_multiline_style": "The sample uses a single-cell prose style for description. Do not force multiline formatting unless the approved sample for the run explicitly preserves it.",
+    "description_merge_split_style": "The sample indicates merged prose descriptions. Merge same-row sub-parts into one description only when they belong to the same source entry and without crossing row boundaries.",
+    "bullet_and_punctuation_style": "Do not prefix values with bullets or numbering. Preserve source punctuation only when it belongs to the content.",
+    "symbol_preservation_rules": [
+      "Preserve mathematical symbols, equations, radicals, superscripts, and subscripts when represented in the source.",
+      "Preserve chemistry notation, Greek letters, domain-specific notation, and punctuation with semantic value.",
+      "Preserve non-Latin scripts and mixed-language content without flattening them into incorrect plain text.",
+      "If native extraction degrades special notation, attempt localized repair from surrounding context and the source evidence before returning the value.",
+      "If notation cannot be repaired confidently, leave the value blank or send the row to manual review rather than inventing plain-text substitutes."
+    ],
+    "field_placement_rules": {
+      "domain": "Use Domain for the named syllabus, strand, domain, or official grouping above the standard level.",
+      "topic": "Use Topic only for a true topic/subtopic label. Leave it blank when the source does not expose one.",
+      "l3": "Use L3 only for a genuine third hierarchy level from the source. Do not copy description text into L3.",
+      "l4": "Use L4 only for a genuine fourth hierarchy level from the source. Otherwise leave it blank.",
+      "l5": "Use L5 only for a genuine fifth hierarchy level from the source. Otherwise leave it blank.",
+      "description": "Use description for the actual learning outcome, standard statement, or descriptive sentence. Do not place hierarchy labels, page headers, or bullet markers in description."
+    },
+    "disallowed_output_content": [
+      "Do not include commentary, analysis notes, or explanations in output cells.",
+      "Do not copy raw HTML, navigation labels, page numbers, or file names into output cells.",
+      "Do not place citation text inside the value columns; citations belong only in the paired _source_citation columns.",
+      "Do not merge multiple standards or outcomes into one row unless the sample CSV clearly does so.",
+      "Do not force text into Topic/L3/L4/L5 when the source does not provide those hierarchy levels.",
+      "Do not prepend bullets, numbering, or labels like 'Description:' to description values."
+    ],
+    "noise_rejection_rules": [
+      "Exclude appendix-only items when they are outside the requested extraction scope.",
+      "Exclude notes such as 'N.B.' unless the sample or instructions explicitly require them.",
+      "Exclude repeated headers, repeated footers, page numbers, and continuation fragments from adjacent rows.",
+      "Exclude source layout labels, technical extraction artifacts, and non-row structural text.",
+      "Reject description values contaminated by neighboring row text or document chrome."
+    ],
+    "sample_rows": [
+      {
+        "source": "https://www.nsw.gov.au/education-and-training/nesa/curriculum/pdhpe/cafs-stage-6-2022",
+        "grade_level": "Senior",
+        "display_grade": "Year 12",
+        "grade_number": "Year 12",
+        "Subject": "Personal Development, Health and Physical Education (PDHPE)",
+        "Domain": "Community and Family Studies Stage 6 Syllabus (2022)",
+        "Topic": "",
+        "L3": "",
+        "L4": "",
+        "L5": "",
+        "Standard code": "P1.1",
+        "Display standard code": "P1.1",
+        "description": "describes the contribution an individual's experiences, values, attitudes and beliefs make to the development of goals",
+        "czi_standard_code": ""
+      }
+    ]
+  }
+}
