@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Any
 
@@ -322,7 +323,9 @@ class ExtractionEngine:
         region_override: ExtractionRegion | None = None,
     ) -> ExtractionAttempt:
         schema_path = str(self.settings.schema_config_path)
-        payload_model = get_extraction_payload_model(schema_path)
+        payload_model = get_extraction_payload_model(
+            schema_path, include_citations=self.settings.extraction_citations_enabled
+        )
 
         parsed_document = self._apply_region_targeting(parsed_document, region_override)
 
@@ -344,10 +347,44 @@ class ExtractionEngine:
         chunks = self._chunk_markdown(parsed_document.markdown)
         payload_rows: list[BaseModel] = []
         anchoring_plan: dict[str, str] = {}
-        for chunk in chunks:
-            rows, plan = self._extract_chunk_rows(
-                parsed_document, planning, prior_error_log, envelope_model, chunk
-            )
+
+        # Extract chunks concurrently. The global LLM semaphore in portkey_client
+        # is the real ceiling, so this just fills idle capacity; a big multi-chunk
+        # document no longer pays the sum of its chunk latencies serially. Results
+        # are reassembled in source order to keep row ordering stable.
+        max_workers = max(1, min(self.settings.llm_max_concurrency, len(chunks)))
+        if len(chunks) <= 1 or max_workers <= 1:
+            chunk_results = [
+                self._extract_chunk_rows(parsed_document, planning, prior_error_log, envelope_model, chunk)
+                for chunk in chunks
+            ]
+        else:
+            indexed: list[tuple[list[BaseModel], dict[str, str]] | None] = [None] * len(chunks)
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {
+                    executor.submit(
+                        self._extract_chunk_rows,
+                        parsed_document,
+                        planning,
+                        prior_error_log,
+                        envelope_model,
+                        chunk,
+                    ): index
+                    for index, chunk in enumerate(chunks)
+                }
+                first_error: Exception | None = None
+                for future in as_completed(futures):
+                    index = futures[future]
+                    try:
+                        indexed[index] = future.result()
+                    except Exception as exc:  # noqa: BLE001 - re-raised after drain
+                        if first_error is None:
+                            first_error = exc
+                if first_error is not None:
+                    raise first_error
+            chunk_results = [item for item in indexed if item is not None]
+
+        for rows, plan in chunk_results:
             payload_rows.extend(rows)
             anchoring_plan.update(plan)
 
@@ -684,9 +721,11 @@ Source markdown:
                 model=self.settings.extractor_model,
                 response_model=response_model,
                 messages=messages,
-                max_tokens=32000,
+                max_retries=self.settings.extractor_max_retries,
+                max_tokens=self.settings.extractor_max_tokens,
                 max_concurrency=self.settings.llm_max_concurrency,
                 fallbacks=self.settings.extractor_fallbacks,
+                timeout=self.settings.request_timeout_seconds,
             )
         except Exception as exc:
             LOGGER.exception(

@@ -50,6 +50,63 @@ class TransformationReviewer:
         )
         return row_model.model_validate(reviewed_row.model_dump()), metadata
 
+    def review_and_fix_batch(
+        self,
+        rows: list[BaseModel],
+        parsed_document: ParsedDocument,
+        planning: PreExtractionUnderstanding,
+        prior_issues: list[list[str]] | None = None,
+    ) -> list[tuple[BaseModel, TransformationReviewMetadata]]:
+        """Review and fix several rows in a single model call.
+
+        Programmatic fixes run per-row (local, no LLM). The remaining rows go to
+        the model as one batch; corrected rows are matched back to their input by
+        list index. Falls back to sequential single-row review if the batch reply
+        does not cover every row, so a malformed batch never silently drops rows.
+
+        `prior_issues` (aligned by index) carries the evaluator's specific
+        complaints from a previous pass so this re-fix can target them directly.
+        """
+        if not rows:
+            return []
+        if len(rows) == 1 and not prior_issues:
+            return [self.review_and_fix(rows[0], parsed_document, planning)]
+
+        row_model = rows[0].__class__
+        prepared: list[tuple[BaseModel, list[str]]] = [self._apply_programmatic_fixes(row) for row in rows]
+        prepared_rows = [item[0] for item in prepared]
+        programmatic_fixes = [item[1] for item in prepared]
+
+        try:
+            reviewed = self._review_batch_with_model(prepared_rows, parsed_document, planning, prior_issues)
+        except Exception as exc:  # noqa: BLE001 - fall back to the proven single-row path
+            LOGGER.warning(
+                "Batch review failed (%s); falling back to per-row review for %d rows.",
+                type(exc).__name__,
+                len(rows),
+            )
+            return [self.review_and_fix(row, parsed_document, planning) for row in rows]
+
+        if len(reviewed) != len(prepared_rows):
+            LOGGER.warning(
+                "Batch review returned %d rows for %d inputs; falling back to per-row review.",
+                len(reviewed),
+                len(prepared_rows),
+            )
+            return [self.review_and_fix(row, parsed_document, planning) for row in rows]
+
+        results: list[tuple[BaseModel, TransformationReviewMetadata]] = []
+        for index, (corrected_row, metadata) in enumerate(reviewed):
+            merged_fixes = [*programmatic_fixes[index], *metadata.fixes_applied]
+            merged_metadata = TransformationReviewMetadata(
+                was_modified=bool(programmatic_fixes[index]) or metadata.was_modified,
+                issues_found=metadata.issues_found,
+                fixes_applied=merged_fixes,
+                confidence_notes=metadata.confidence_notes,
+            )
+            results.append((row_model.model_validate(corrected_row.model_dump()), merged_metadata))
+        return results
+
     def _apply_programmatic_fixes(self, row: BaseModel) -> tuple[BaseModel, list[str]]:
         row_model = row.__class__
         data = row.model_dump()
@@ -111,7 +168,10 @@ class TransformationReviewer:
         planning: PreExtractionUnderstanding,
     ) -> tuple[BaseModel, TransformationReviewMetadata]:
         row_model = row.__class__
-        payload_model = get_extraction_payload_model(str(self.settings.schema_config_path))
+        payload_model = get_extraction_payload_model(
+            str(self.settings.schema_config_path),
+            include_citations=self.settings.extraction_citations_enabled,
+        )
         response_model = create_model(
             "TransformationReviewEnvelope",
             __base__=BaseModel,
@@ -128,6 +188,55 @@ class TransformationReviewer:
         metadata = {field: getattr(row, field) for field in PIPELINE_METADATA_FIELDS}
         corrected_row = row_model.model_validate({**metadata, **response.corrected_row.model_dump()})
         return corrected_row, response.review
+
+    def _review_batch_with_model(
+        self,
+        rows: list[BaseModel],
+        parsed_document: ParsedDocument,
+        planning: PreExtractionUnderstanding,
+        prior_issues: list[list[str]] | None = None,
+    ) -> list[tuple[BaseModel, TransformationReviewMetadata]]:
+        row_model = rows[0].__class__
+        payload_model = get_extraction_payload_model(
+            str(self.settings.schema_config_path),
+            include_citations=self.settings.extraction_citations_enabled,
+        )
+        item_model = create_model(
+            "TransformationReviewItem",
+            __base__=BaseModel,
+            __module__=__name__,
+            row_index=(int, Field(description="Zero-based index of the row this correction applies to.")),
+            review=(TransformationReviewMetadata, Field(description="Review findings and applied fixes for this row.")),
+            corrected_row=(payload_model, Field(description="Corrected row after review.")),
+        )
+        response_model = create_model(
+            "TransformationReviewBatchEnvelope",
+            __base__=BaseModel,
+            __module__=__name__,
+            items=(list[item_model], Field(description="One corrected item per input row, in the same order.")),
+        )
+
+        messages = self._build_batch_review_messages(rows, parsed_document, planning, prior_issues)
+        response = self._call_review_model(response_model, messages)
+
+        # Map corrected rows back to their input by explicit row_index; require full
+        # coverage so a short/misaligned reply triggers the caller's per-row fallback.
+        by_index: dict[int, Any] = {}
+        for item in response.items:
+            if 0 <= item.row_index < len(rows) and item.row_index not in by_index:
+                by_index[item.row_index] = item
+        if len(by_index) != len(rows):
+            raise TransformationReviewError(
+                f"Batch review covered {len(by_index)} of {len(rows)} rows."
+            )
+
+        results: list[tuple[BaseModel, TransformationReviewMetadata]] = []
+        for index, row in enumerate(rows):
+            item = by_index[index]
+            metadata = {field: getattr(row, field) for field in PIPELINE_METADATA_FIELDS}
+            corrected_row = row_model.model_validate({**metadata, **item.corrected_row.model_dump()})
+            results.append((corrected_row, item.review))
+        return results
 
     def _build_review_messages(
         self,
@@ -199,6 +308,96 @@ Original document markdown:
             {"role": "user", "content": user_prompt},
         ]
 
+    def _build_batch_review_messages(
+        self,
+        rows: list[BaseModel],
+        parsed_document: ParsedDocument,
+        planning: PreExtractionUnderstanding,
+        prior_issues: list[list[str]] | None = None,
+    ) -> list[dict[str, str]]:
+        schema_config = load_schema_config(settings=self.settings)
+        schema_json = json.dumps(schema_config.model_dump(mode="json"), indent=2)
+        sample_contract_json = (
+            json.dumps(schema_config.sample_contract.model_dump(mode="json"), indent=2)
+            if schema_config.sample_contract
+            else "null"
+        )
+        planning_json = json.dumps(planning.model_dump(mode="json"), indent=2)
+        rows_json = json.dumps(
+            [
+                {
+                    "row_index": index,
+                    "row": schema_only_row_view(row),
+                    # Specific defects the evaluator flagged last pass; fix these first.
+                    **(
+                        {"must_fix_issues": prior_issues[index]}
+                        if prior_issues and index < len(prior_issues) and prior_issues[index]
+                        else {}
+                    ),
+                }
+                for index, row in enumerate(rows)
+            ],
+            indent=2,
+        )
+
+        system_prompt = (
+            "You are a transformation evaluator and fixer. "
+            "Review each extracted CSV row against the source document, the sample CSV contract, and the row-formation plan. "
+            "Apply only minimal supported fixes. "
+            "Do not invent missing facts. "
+            "Preserve citations, symbols, multilingual content, multiline structure, and row boundaries. "
+            "Do not hardcode one hierarchy interpretation across subjects; preserve the subject-specific column meanings inferred from the sample contract and source. "
+            "grade_level must be exactly one of: Elementary School, Middle School, High School. "
+            "Review each row independently; do not merge, drop, or reorder rows. "
+            "Return exactly one item per input row, echoing its row_index. "
+            "Return your response as a single JSON object."
+        )
+
+        user_prompt = f"""
+Schema:
+{schema_json}
+
+Sample CSV transformation contract:
+{sample_contract_json}
+
+Pre-extraction understanding artifact:
+{planning_json}
+
+Transformed rows to review (each has a row_index):
+{rows_json}
+
+Review goals (apply to EACH row independently):
+- check whether the transformation matches the source and the sample contract
+- check whether subject, domain, topic, grade_level, display_grade, grade_number, and source follow the sample-derived column semantics for this subject rather than a generic cross-subject assumption
+- normalize grade_level to exactly Elementary School, Middle School, or High School when the source supports that mapping
+- fix incorrect placement, formatting, merged/split text issues, or minor transformation errors when the source supports a correction
+- if the approved sample pattern implies a canonical public source link and the source supports identifying it, prefer that canonical link over a local staged file name
+- if the approved sample pattern implies row-specific stage or learner-band values, do not collapse them into one document-wide grade label
+- if grade_number is a numeric range such as `9-12`, normalize it to a comma-separated sequence such as `9,10,11,12`, with no spaces after commas
+- if the approved sample supports merged topic cells and one standard genuinely applies to multiple topics, merge those topic names into one topic field using ` | ` rather than duplicating the row only for topic labels
+- ensure `Display standard code` stays unique within the CSV; if the same raw code repeats across multiple domains or sections, add a short domain code prefix when the source structure supports that disambiguation
+- if the approved sample supports prefixed or formed display codes and repeated rows share the same description and raw display code, use a short domain code or topic code prefix with a dot, whichever makes the display code unique
+- preserve display logic such as synthetic or source-faithful display standard code when consistent with the sample contract
+- preserve description completeness, notation, bullets/punctuation style, and multiline behavior required by the sample
+- reject noise, neighboring-row contamination, and unsupported values
+
+Output requirements:
+- return one item per input row in `items`, each with the matching row_index
+- if a row carries `must_fix_issues`, those are defects a prior evaluation found: fix EACH of them using the source, and do not reintroduce them
+- review.was_modified should be true only if you actually change that row
+- review.issues_found should list all detected transformation problems for that row
+- review.fixes_applied should describe only the corrections you actually made to that row
+- corrected_row must be the final row to send to the final critic
+
+Original document markdown:
+{parsed_document.markdown}
+""".strip()
+
+        return [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+
     def _call_review_model(self, response_model: type[BaseModel], messages: list[dict[str, str]]) -> BaseModel:
         if self.settings.portkey_api_key:
             return self._call_portkey_json(response_model, messages)
@@ -258,6 +457,7 @@ Original document markdown:
                 messages=messages,
                 max_concurrency=self.settings.llm_max_concurrency,
                 fallbacks=self.settings.critic_fallbacks,
+                timeout=self.settings.request_timeout_seconds,
             )
         except Exception as exc:
             LOGGER.exception(

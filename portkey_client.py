@@ -64,6 +64,7 @@ def call_portkey_structured(
     max_tokens: int = DEFAULT_MAX_TOKENS,
     max_concurrency: int = DEFAULT_MAX_CONCURRENCY,
     fallbacks: list[tuple[str, str]] | None = None,
+    timeout: float = DEFAULT_REQUEST_TIMEOUT_SECONDS,
 ) -> T:
     """Call a Portkey-routed model and return a schema-validated Pydantic object.
 
@@ -90,6 +91,7 @@ def call_portkey_structured(
                 max_retries=max_retries,
                 max_tokens=max_tokens,
                 max_concurrency=max_concurrency,
+                timeout=timeout,
             )
         except Exception as exc:  # noqa: BLE001 - decide below whether to fail over
             last_exc = exc
@@ -118,6 +120,7 @@ def _call_one_target(
     max_retries: int,
     max_tokens: int,
     max_concurrency: int,
+    timeout: float = DEFAULT_REQUEST_TIMEOUT_SECONDS,
 ) -> T:
     import instructor
     from openai import OpenAI
@@ -127,7 +130,7 @@ def _call_one_target(
         api_key="portkey",  # actual credentials travel in the Portkey headers
         base_url=PORTKEY_GATEWAY_URL,
         default_headers=createHeaders(api_key=api_key, provider=provider),
-        timeout=DEFAULT_REQUEST_TIMEOUT_SECONDS,
+        timeout=timeout,
         max_retries=2,
     )
     # MD_JSON tolerates fenced ```json blocks, which Claude via Vertex emits.

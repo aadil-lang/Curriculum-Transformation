@@ -9,7 +9,7 @@ from pathlib import Path
 from config import RuntimePaths, Settings
 from csv_audit import audit_extracted_csv
 from google_sheets_sync import sync_csv_to_configured_google_sheet
-from schemas import get_output_column_name, get_schema_fields
+from schemas import REVIEW_ISSUES_COLUMN, REVIEW_STATUS_COLUMN, get_output_column_name, get_schema_fields
 
 
 def write_schema_only_csv(full_csv_path: Path, settings: Settings) -> Path | None:
@@ -27,14 +27,17 @@ def write_schema_only_csv(full_csv_path: Path, settings: Settings) -> Path | Non
         get_output_column_name(spec)
         for spec in get_schema_fields(str(settings.schema_config_path))
     ]
+    # Keep the exact sample columns, then append the review markers so unfixed
+    # rows remain visible and flagged in the deliverable rather than dropped.
+    output_columns = [*schema_columns, REVIEW_STATUS_COLUMN, REVIEW_ISSUES_COLUMN]
     clean_path = full_csv_path.with_name(f"{full_csv_path.stem}.clean.csv")
     with full_csv_path.open(newline="", encoding="utf-8-sig") as src:
         reader = csv.DictReader(src)
         with clean_path.open("w", newline="", encoding="utf-8") as dst:
-            writer = csv.DictWriter(dst, fieldnames=schema_columns, extrasaction="ignore")
+            writer = csv.DictWriter(dst, fieldnames=output_columns, extrasaction="ignore")
             writer.writeheader()
             for row in reader:
-                writer.writerow({col: row.get(col, "") for col in schema_columns})
+                writer.writerow({col: row.get(col, "") for col in output_columns})
     return clean_path
 
 

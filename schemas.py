@@ -11,6 +11,12 @@ from config import DEFAULT_SCHEMA_CONFIG_PATH, Settings, get_settings
 
 FieldType = Literal["string", "integer", "number", "boolean"]
 SOURCE_CITATION_SUFFIX = "_source_citation"
+# Trailing marker columns appended after the schema columns. Unfixed rows are
+# kept in the CSV (not dropped) and flagged here so a human can review or delete.
+REVIEW_STATUS_COLUMN = "review_status"
+REVIEW_ISSUES_COLUMN = "review_issues"
+REVIEW_STATUS_OK = ""
+REVIEW_STATUS_NEEDS_REVIEW = "NEEDS_REVIEW"
 ALLOWED_GRADE_LEVELS = ("Elementary School", "Middle School", "High School")
 GRADE_LEVEL_NAMING_RULE = (
     "Use exactly one of these grade_level values: Elementary School, Middle School, High School. "
@@ -114,6 +120,10 @@ class CitationPayloadBase(BaseModel):
     def validate_field_citations(self) -> "CitationPayloadBase":
         for field_name in self.__class__.__schema_field_names__:
             citation_name = f"{field_name}{SOURCE_CITATION_SUFFIX}"
+            # Citation fields are absent when citation generation is disabled;
+            # there is nothing to enforce in that mode.
+            if not hasattr(self, citation_name):
+                continue
             value = getattr(self, field_name)
             citation = getattr(self, citation_name)
 
@@ -189,7 +199,9 @@ def load_schema_config(path: str | None = None, settings: Settings | None = None
     return TargetSchemaConfig.model_validate(raw_data)
 
 
-def _build_dynamic_fields(schema_config: TargetSchemaConfig) -> dict[str, tuple[Any, Field]]:
+def _build_dynamic_fields(
+    schema_config: TargetSchemaConfig, include_citations: bool = True
+) -> dict[str, tuple[Any, Field]]:
     field_map: dict[str, tuple[Any, Field]] = {}
     for spec in schema_config.fields:
         python_type = _map_field_type(spec.field_type)
@@ -199,13 +211,14 @@ def _build_dynamic_fields(schema_config: TargetSchemaConfig) -> dict[str, tuple[
             annotation,
             Field(default=default, description=spec.description),
         )
-        field_map[f"{spec.name}{SOURCE_CITATION_SUFFIX}"] = (
-            str,
-            Field(
-                default="",
-                description=f"Verbatim supporting quote for '{spec.name}' from the source document.",
-            ),
-        )
+        if include_citations:
+            field_map[f"{spec.name}{SOURCE_CITATION_SUFFIX}"] = (
+                str,
+                Field(
+                    default="",
+                    description=f"Verbatim supporting quote for '{spec.name}' from the source document.",
+                ),
+            )
     return field_map
 
 
@@ -221,29 +234,40 @@ def _citation_required_fields(schema_config: TargetSchemaConfig) -> frozenset[st
     return frozenset(spec.name for spec in schema_config.fields if spec.requires_citation)
 
 
-def get_extraction_payload_model(schema_path: str | None = None) -> type[BaseModel]:
+def get_extraction_payload_model(
+    schema_path: str | None = None, include_citations: bool = True
+) -> type[BaseModel]:
     schema_config = load_schema_config(schema_path)
     model = create_model(
         "ExtractionPayload",
         __base__=CitationPayloadBase,
         __module__=__name__,
-        **_build_dynamic_fields(schema_config),
+        **_build_dynamic_fields(schema_config, include_citations=include_citations),
     )
     model.__schema_field_names__ = tuple(spec.name for spec in schema_config.fields)
-    model.__citation_required_fields__ = _citation_required_fields(schema_config)
+    model.__citation_required_fields__ = (
+        _citation_required_fields(schema_config) if include_citations else frozenset()
+    )
     return model
 
 
-def get_target_row_model(schema_path: str | None = None) -> type[BaseModel]:
+def get_target_row_model(
+    schema_path: str | None = None, include_citations: bool = True
+) -> type[BaseModel]:
     schema_config = load_schema_config(schema_path)
+    # The target row always keeps citation columns so the CSV structure is stable;
+    # when citation generation is disabled they simply stay empty and are never
+    # enforced (nor read from the extractor payload, which omits them).
     model = create_model(
         "TargetCsvRow",
         __base__=CsvRowBase,
         __module__=__name__,
-        **_build_dynamic_fields(schema_config),
+        **_build_dynamic_fields(schema_config, include_citations=True),
     )
     model.__schema_field_names__ = tuple(spec.name for spec in schema_config.fields)
-    model.__citation_required_fields__ = _citation_required_fields(schema_config)
+    model.__citation_required_fields__ = (
+        _citation_required_fields(schema_config) if include_citations else frozenset()
+    )
     return model
 
 
@@ -254,10 +278,17 @@ def csv_headers(schema_path: str | None = None) -> list[str]:
         output_column = get_output_column_name(spec)
         headers.append(output_column)
         headers.append(f"{output_column}{SOURCE_CITATION_SUFFIX}")
+    headers.append(REVIEW_STATUS_COLUMN)
+    headers.append(REVIEW_ISSUES_COLUMN)
     return headers
 
 
-def flatten_row(row: BaseModel, schema_path: str | None = None) -> dict[str, Any]:
+def flatten_row(
+    row: BaseModel,
+    schema_path: str | None = None,
+    review_status: str = REVIEW_STATUS_OK,
+    review_issues: str = "",
+) -> dict[str, Any]:
     data = row.model_dump()
     ordered: dict[str, Any] = {}
     schema_fields = get_schema_fields(schema_path)
@@ -271,4 +302,6 @@ def flatten_row(row: BaseModel, schema_path: str | None = None) -> dict[str, Any
         ordered[f"{output_column}{SOURCE_CITATION_SUFFIX}"] = data.get(
             f"{spec.name}{SOURCE_CITATION_SUFFIX}"
         )
+    ordered[REVIEW_STATUS_COLUMN] = review_status
+    ordered[REVIEW_ISSUES_COLUMN] = review_issues
     return ordered

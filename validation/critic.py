@@ -34,6 +34,25 @@ class SemanticAuditVerdict(BaseModel):
         return _normalize_to_string_list(value)
 
 
+class SemanticAuditFinding(BaseModel):
+    row_index: int = Field(description="Zero-based index of the row this verdict applies to.")
+    tag: Literal["VALID", "INVALID"] = Field(description="Validation tag for this row.")
+    is_valid: bool = Field(description="Whether this row is semantically supported by the source.")
+    issues: list[str] = Field(default_factory=list, description="Specific issues for this row.")
+    confidence_notes: str = Field(default="", description="Short explanation for this row's verdict.")
+
+    @field_validator("issues", mode="before")
+    @classmethod
+    def _normalize_issues(cls, value: Any) -> list[str]:
+        return _normalize_to_string_list(value)
+
+
+class SemanticBatchAuditVerdict(BaseModel):
+    findings: list[SemanticAuditFinding] = Field(
+        default_factory=list, description="One verdict per input row, echoing its row_index."
+    )
+
+
 class ExtractionCritic:
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or get_settings()
@@ -46,6 +65,86 @@ class ExtractionCritic:
             issue_block = " | ".join(verdict.issues) if verdict.issues else verdict.confidence_notes
             raise CriticValidationError(issue_block or "Semantic audit failed.")
         return verdict
+
+    def validate_batch(
+        self, rows: list[BaseModel], parsed_document: ParsedDocument
+    ) -> list[SemanticAuditVerdict | CriticValidationError]:
+        """Validate several rows, returning a per-row verdict OR the error for that row.
+
+        Preserves the single-row gate: each row is Pydantic-revalidated and run
+        through the programmatic preflight locally; a row that fails either gets a
+        CriticValidationError in its slot without an LLM call. Rows that pass
+        preflight are audited together in one model call. Any batch-level failure
+        falls back to per-row validate() so semantics never silently change.
+        """
+        if not rows:
+            return []
+        if len(rows) == 1:
+            try:
+                return [self.validate(rows[0], parsed_document)]
+            except CriticValidationError as exc:
+                return [exc]
+
+        results: list[SemanticAuditVerdict | CriticValidationError | None] = [None] * len(rows)
+        to_audit: list[tuple[int, BaseModel]] = []
+        for index, row in enumerate(rows):
+            try:
+                row.__class__.model_validate(row.model_dump())
+                self._run_contract_preflight(row)
+            except CriticValidationError as exc:
+                results[index] = exc
+                continue
+            to_audit.append((index, row))
+
+        if to_audit:
+            audited = self._semantic_audit_batch([row for _, row in to_audit], parsed_document)
+            for (index, _row), verdict in zip(to_audit, audited):
+                if verdict.tag != "VALID" or not verdict.is_valid:
+                    issue_block = " | ".join(verdict.issues) if verdict.issues else verdict.confidence_notes
+                    results[index] = CriticValidationError(issue_block or "Semantic audit failed.")
+                else:
+                    results[index] = verdict
+
+        return [
+            result if result is not None else CriticValidationError("Critic produced no verdict for this row.")
+            for result in results
+        ]
+
+    def _semantic_audit_batch(
+        self, rows: list[BaseModel], parsed_document: ParsedDocument
+    ) -> list[SemanticAuditVerdict]:
+        """One batched semantic audit call; falls back to per-row on any failure."""
+        try:
+            batch = self._audit_batch_with_model(rows, parsed_document)
+        except Exception as exc:  # noqa: BLE001 - fall back to proven per-row audit
+            LOGGER.warning(
+                "Batch semantic audit failed (%s); falling back to per-row audit for %d rows.",
+                type(exc).__name__,
+                len(rows),
+            )
+            return [self._semantic_audit(row, parsed_document) for row in rows]
+
+        by_index: dict[int, SemanticAuditFinding] = {}
+        for finding in batch.findings:
+            if 0 <= finding.row_index < len(rows) and finding.row_index not in by_index:
+                by_index[finding.row_index] = finding
+        if len(by_index) != len(rows):
+            LOGGER.warning(
+                "Batch audit covered %d of %d rows; falling back to per-row audit.",
+                len(by_index),
+                len(rows),
+            )
+            return [self._semantic_audit(row, parsed_document) for row in rows]
+
+        return [
+            SemanticAuditVerdict(
+                tag=by_index[index].tag,
+                is_valid=by_index[index].is_valid,
+                issues=by_index[index].issues,
+                confidence_notes=by_index[index].confidence_notes,
+            )
+            for index in range(len(rows))
+        ]
 
     def _semantic_audit(self, row: BaseModel, parsed_document: ParsedDocument) -> SemanticAuditVerdict:
         if self.settings.portkey_api_key:
@@ -132,6 +231,142 @@ Original document markdown:
             },
             {"role": "user", "content": prompt},
         ]
+
+    def _build_batch_audit_messages(
+        self, rows: list[BaseModel], parsed_document: ParsedDocument
+    ) -> list[dict[str, str]]:
+        schema_config = load_schema_config(settings=self.settings)
+        rows_json = json.dumps(
+            [{"row_index": index, "row": critic_row_view(row, schema_config)} for index, row in enumerate(rows)],
+            indent=2,
+        )
+        sample_contract_json = (
+            json.dumps(schema_config.sample_contract.model_dump(mode="json"), indent=2)
+            if schema_config.sample_contract
+            else "null"
+        )
+        verbatim_columns = [
+            get_output_column_name(spec) for spec in schema_config.fields if spec.requires_citation
+        ]
+        derived_columns = [
+            get_output_column_name(spec) for spec in schema_config.fields if not spec.requires_citation
+        ]
+        verbatim_list = ", ".join(verbatim_columns) or "(none)"
+        derived_list = ", ".join(derived_columns) or "(none)"
+        prompt = f"""
+Audit each extracted row against the original document and the approved sample CSV contract.
+Judge every row INDEPENDENTLY and return exactly one verdict per row, echoing its row_index.
+
+Default to VALID. This pipeline's job is to TRANSFORM messy source text into clean contract
+values, so transformation, mapping, inheritance, and synthesis are EXPECTED and correct — not
+suspicious. Return tag=INVALID for a row only when you can point to a CONCRETE, demonstrable
+violation (quote the offending value and say exactly which rule it breaks). Do NOT reject on
+speculation, hedging, or vague doubt ("possible", "may have", "risks", "insufficient clarity",
+"lacks explicit evidence" are NOT valid reasons). If you are not sure a row is wrong, it is VALID.
+
+Field citation policy:
+- Verbatim-cited fields ({verbatim_list}): the citation should contain the field's text as it
+  appears in the source. Ignore differences in surrounding whitespace, tabs, leading list
+  markers/codes, and line breaks — a match that differs only in formatting IS a valid verbatim
+  citation. Reject only if the cited text is genuinely absent from the source or clearly
+  supports a different value.
+- Derived/transformed fields ({derived_list}): these carry no citation and must NOT be judged on
+  citations at all. Accept them as long as the value is a reasonable transformation consistent
+  with the source context and the sample contract.
+
+Reject a row ONLY for these concrete problems:
+- A verbatim-cited field's cited text is not present in the source at all.
+- A field value is clearly copied from the wrong place (neighboring-row contamination) or is
+  document noise (headers, footers, page numbers, N.B. notes, nav links, layout labels).
+- A description is truncated mid-sentence or drops required sub-parts that the citation shows.
+- Loss/garbling of mathematical, chemistry, Greek, notation, or multilingual characters that the
+  source clearly contains.
+- grade_level is not exactly one of: Elementary School, Middle School, High School.
+- A value plainly contradicts the sample CSV contract's stated rules.
+
+Do NOT reject for: an empty citation on a derived field, a formatting-only citation difference,
+a prefixed/synthesized display code, a canonical source URL not printed in the body, a null
+optional field, or duplicate display codes (uniqueness is resolved later by the pipeline).
+
+Sample CSV transformation contract:
+{sample_contract_json}
+
+Extracted rows to audit (each has a row_index):
+{rows_json}
+
+Original document markdown:
+{parsed_document.markdown}
+""".strip()
+
+        return [
+            {
+                "role": "system",
+                "content": (
+                    "You are a data extraction validator. Your goal is to pass every row that is a "
+                    "faithful, contract-consistent transformation of the source, and to reject only "
+                    "rows with a concrete, demonstrable defect you can point to. Transformation of "
+                    "source text into contract values is expected and correct, not a defect. Judge "
+                    "each row independently and return one verdict per row. When in doubt, return "
+                    "VALID. Return your response as a single JSON object."
+                ),
+            },
+            {"role": "user", "content": prompt},
+        ]
+
+    def _audit_batch_with_model(
+        self, rows: list[BaseModel], parsed_document: ParsedDocument
+    ) -> SemanticBatchAuditVerdict:
+        messages = self._build_batch_audit_messages(rows, parsed_document)
+        if self.settings.portkey_api_key:
+            return self._call_portkey_batch(messages)
+        provider = self.settings.critic_provider
+        if provider == "openai":
+            return self._call_openai_batch(messages)
+        if provider == "anthropic":
+            return self._call_anthropic_batch(messages)
+        raise CriticValidationError(f"Unsupported critic provider: {provider}")
+
+    def _call_openai_batch(self, messages: list[dict[str, str]]) -> SemanticBatchAuditVerdict:
+        import instructor
+        from openai import OpenAI
+
+        client = instructor.from_openai(OpenAI(api_key=self.settings.openai_api_key))
+        return client.chat.completions.create(
+            model=self.settings.critic_model,
+            response_model=SemanticBatchAuditVerdict,
+            messages=messages,
+            max_retries=0,
+        )
+
+    def _call_anthropic_batch(self, messages: list[dict[str, str]]) -> SemanticBatchAuditVerdict:
+        import instructor
+        from anthropic import Anthropic
+
+        client = instructor.from_anthropic(
+            Anthropic(api_key=self.settings.anthropic_api_key),
+            mode=instructor.Mode.ANTHROPIC_JSON,
+        )
+        return client.messages.create(
+            model=self.settings.critic_model,
+            response_model=SemanticBatchAuditVerdict,
+            messages=messages,
+            max_retries=0,
+        )
+
+    def _call_portkey_batch(self, messages: list[dict[str, str]]) -> SemanticBatchAuditVerdict:
+        from portkey_client import call_portkey_structured
+
+        provider = self.settings.portkey_critic_provider or self._infer_portkey_critic_provider()
+        return call_portkey_structured(
+            api_key=self.settings.portkey_api_key,
+            provider=provider,
+            model=self.settings.critic_model,
+            response_model=SemanticBatchAuditVerdict,
+            messages=messages,
+            max_concurrency=self.settings.llm_max_concurrency,
+            fallbacks=self.settings.critic_fallbacks,
+            timeout=self.settings.request_timeout_seconds,
+        )
 
     def _run_contract_preflight(self, row: BaseModel) -> None:
         schema_config = load_schema_config(settings=self.settings)
@@ -231,6 +466,7 @@ Original document markdown:
                 messages=self._build_audit_messages(row, parsed_document),
                 max_concurrency=self.settings.llm_max_concurrency,
                 fallbacks=self.settings.critic_fallbacks,
+                timeout=self.settings.request_timeout_seconds,
             )
         except Exception as exc:
             LOGGER.exception(

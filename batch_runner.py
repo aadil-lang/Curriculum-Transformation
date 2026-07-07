@@ -145,13 +145,17 @@ def _run_single_batch(
         batch.input_files, runtime_paths, settings=settings, program_filter=batch.program_filter
     )
     resolved_sample_csv = _materialize_optional_sample_csv(batch.sample_csv, runtime_paths)
+    # The sample CSV doubles as a manifest ONLY when it is the sole source of
+    # inputs. When real inputs were provided separately (uploaded files or pasted
+    # URLs), the sample is a schema contract whose rows are example outputs; its
+    # 'source' column then repeats the same page and must not be re-ingested.
     sample_manifest_inputs = (
         _expand_manifest_csv_inputs(
             manifest_path=resolved_sample_csv,
             destination_dir=runtime_paths.input_dir,
             default_stub_prefix=f"{batch.name}_sample_source",
         )
-        if resolved_sample_csv
+        if resolved_sample_csv and not resolved_input_files
         else []
     )
     resolved_input_files = _merge_unique_paths(resolved_input_files, sample_manifest_inputs)
@@ -1108,16 +1112,23 @@ def _looks_like_bool(value: str) -> bool:
 
 
 def _looks_like_int(value: str) -> bool:
+    # A comma means a list (e.g. a grade sequence "9,10,11,12"), not a
+    # thousands-separated integer. Such values must be typed as strings so the
+    # extraction schema accepts the comma-separated form.
+    if "," in value:
+        return False
     try:
-        int(value.replace(",", ""))
+        int(value)
     except ValueError:
         return False
     return True
 
 
 def _looks_like_float(value: str) -> bool:
+    if "," in value:
+        return False
     try:
-        float(value.replace(",", ""))
+        float(value)
     except ValueError:
         return False
     return True

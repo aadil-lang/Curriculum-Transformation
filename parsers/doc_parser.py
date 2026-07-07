@@ -3,10 +3,19 @@ from __future__ import annotations
 import shutil
 import subprocess
 import tempfile
+import threading
 from pathlib import Path
 
 from parsers.base import ParsedDocument
 from parsers.docx_parser import parse_docx
+
+
+# LibreOffice shares a single user profile by default, so two concurrent
+# headless conversions collide: one silently no-ops (returncode 0, no output
+# file). Each conversion below runs against an isolated profile via
+# -env:UserInstallation; the lock serializes the brief spawn window as a
+# belt-and-suspenders against any residual shared-state races.
+_SOFFICE_LOCK = threading.Lock()
 
 
 _SOFFICE_FALLBACK_PATHS = (
@@ -38,12 +47,25 @@ def parse_doc(path: Path) -> ParsedDocument:
     soffice = _find_soffice()
     converted_from = path.suffix.lower().lstrip(".") or "doc"
     with tempfile.TemporaryDirectory(prefix="doc2docx-") as tmp_dir:
-        result = subprocess.run(
-            [soffice, "--headless", "--convert-to", "docx", "--outdir", tmp_dir, str(path)],
-            capture_output=True,
-            text=True,
-            timeout=180,
-        )
+        profile_dir = Path(tmp_dir) / "profile"
+        profile_uri = profile_dir.as_uri()
+        command = [
+            soffice,
+            "--headless",
+            f"-env:UserInstallation={profile_uri}",
+            "--convert-to",
+            "docx",
+            "--outdir",
+            tmp_dir,
+            str(path),
+        ]
+        with _SOFFICE_LOCK:
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=180,
+            )
         converted = Path(tmp_dir) / f"{path.stem}.docx"
         if result.returncode != 0 or not converted.exists():
             raise RuntimeError(

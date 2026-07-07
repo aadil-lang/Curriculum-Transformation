@@ -106,7 +106,25 @@ class Settings:
         default_factory=lambda: max(1, int(os.getenv("LLM_MAX_CONCURRENCY", "12")))
     )
     extraction_max_chars_per_chunk: int = field(
-        default_factory=lambda: max(4000, int(os.getenv("EXTRACTION_MAX_CHARS_PER_CHUNK", "45000")))
+        default_factory=lambda: max(4000, int(os.getenv("EXTRACTION_MAX_CHARS_PER_CHUNK", "15000")))
+    )
+    request_timeout_seconds: float = field(
+        default_factory=lambda: max(30.0, float(os.getenv("REQUEST_TIMEOUT_SECONDS", "300")))
+    )
+    extractor_max_retries: int = field(
+        default_factory=lambda: max(0, int(os.getenv("EXTRACTOR_MAX_RETRIES", "1")))
+    )
+    extractor_max_tokens: int = field(
+        default_factory=lambda: max(4000, int(os.getenv("EXTRACTOR_MAX_TOKENS", "64000")))
+    )
+    extraction_citations_enabled: bool = field(
+        default_factory=lambda: os.getenv("EXTRACTION_CITATIONS", "1").strip().lower() not in {"0", "false", "no", "off", ""}
+    )
+    review_batch_size: int = field(
+        default_factory=lambda: max(1, int(os.getenv("REVIEW_BATCH_SIZE", "10")))
+    )
+    fix_loop_max_passes: int = field(
+        default_factory=lambda: max(1, int(os.getenv("FIX_LOOP_MAX_PASSES", "2")))
     )
     enable_region_targeting: bool = field(
         default_factory=lambda: os.getenv("ENABLE_REGION_TARGETING", "1").strip().lower() not in {"0", "false", "no", ""}

@@ -25,7 +25,15 @@ from config import (
 )
 from csv_finalization import finalize_extracted_csv
 from parsers.router import discover_supported_files, parse_input
-from schemas import csv_headers, flatten_row, get_schema_fields, get_target_row_model, load_schema_config
+from schemas import (
+    REVIEW_STATUS_NEEDS_REVIEW,
+    csv_headers,
+    flatten_row,
+    get_schema_fields,
+    get_target_row_model,
+    load_schema_config,
+    schema_only_row_view,
+)
 from validation.critic import ExtractionCritic
 from validation.reviewer import TransformationReviewer
 
@@ -132,7 +140,9 @@ class DataTransformationPipeline:
         review_metadata_by_row: list[Any] = []
         error_log_history: list[str] = []
         schema_path = str(self.settings.schema_config_path)
-        row_model = get_target_row_model(schema_path)
+        row_model = get_target_row_model(
+            schema_path, include_citations=self.settings.extraction_citations_enabled
+        )
 
         try:
             parsed_document = parse_input(path)
@@ -153,17 +163,30 @@ class DataTransformationPipeline:
                 if not extraction.payload_rows:
                     raise RuntimeError("Extractor returned no rows for this source.")
 
-                validated_rows, review_metadata_by_row = self._review_and_validate_rows(
+                validated_rows, review_metadata_by_row, failed_rows = self._review_and_validate_rows(
                     extraction.payload_rows, parsed_document, extraction.planning, row_model
                 )
 
                 self._write_review_artifact(path, parsed_document, validated_rows, review_metadata_by_row)
-                self._append_rows_to_csv(validated_rows)
+                # Keep unfixed rows in the CSV, flagged NEEDS_REVIEW, rather than
+                # dropping them — the human decides whether they truly need removal.
+                all_rows = validated_rows + [failure["row"] for failure in failed_rows]
+                row_issues = {
+                    len(validated_rows) + i: failure.get("issues", [])
+                    for i, failure in enumerate(failed_rows)
+                }
+                self._append_rows_to_csv(all_rows, row_issues=row_issues)
+                # Also record the flagged rows in the manual-review log for detail.
+                if failed_rows:
+                    self._log_failed_rows_manual_review(path, parsed_document, failed_rows)
                 self._mark_processed(path, "verified", error_log_history, retryable=False)
+                message = f"Reviewed, validated, and appended {len(all_rows)} row(s) to CSV."
+                if failed_rows:
+                    message += f" {len(failed_rows)} row(s) flagged NEEDS_REVIEW."
                 return ProcessResult(
                     path=path,
                     status="verified",
-                    message=f"Reviewed, validated, and appended {len(validated_rows)} row(s) to CSV.",
+                    message=message,
                     stage="transformation_review_and_critic",
                 )
             except Exception as exc:
@@ -215,13 +238,24 @@ class DataTransformationPipeline:
         parsed_document: Any,
         planning: Any,
         row_model: type[BaseModel],
-    ) -> tuple[list[BaseModel], list[Any]]:
+    ) -> tuple[list[BaseModel], list[Any], list[dict[str, Any]]]:
+        """Fix-loop quality control.
+
+        For each batch: fix rows from the source (reviewer), evaluate against the
+        source (critic), then feed each failing row's specific issues back to the
+        reviewer for up to `fix_loop_max_passes` targeted re-fixes. Rows that pass
+        are validated; rows that still fail after the loop are collected as
+        failures rather than raising. Returns (validated_rows, review_metadata,
+        failed_rows) — failed_rows is a list of {row, issues} dicts. Raises only
+        when the whole document yields zero validated rows, so the outer retry
+        loop still fires for a total failure.
+        """
         canonical_source = self._canonical_source(parsed_document)
         schema_fields = {spec.name for spec in get_schema_fields(str(self.settings.schema_config_path))}
         has_source_field = "source" in schema_fields
 
-        def handle(payload: BaseModel) -> tuple[BaseModel, Any]:
-            row = row_model.model_validate(
+        def build_row(payload: BaseModel) -> BaseModel:
+            return row_model.model_validate(
                 {
                     "source_document": parsed_document.source_name,
                     "source_type": parsed_document.source_type,
@@ -230,35 +264,98 @@ class DataTransformationPipeline:
                     **payload.model_dump(),
                 }
             )
-            row, review_metadata = self.reviewer.review_and_fix(row, parsed_document, planning)
-            verdict = self.critic.validate(row, parsed_document)
-            if verdict.tag != "VALID":
-                raise RuntimeError("Critic did not return a VALID tag.")
-            # Stamp the canonical source link AFTER review/critic so neither stage
-            # can strip it (the model omits it since it isn't verbatim in the body),
-            # and it is deterministic pipeline provenance, not model-extracted content.
-            if has_source_field and canonical_source:
-                updates: dict[str, Any] = {}
-                if not str(getattr(row, "source", "") or "").strip():
-                    updates["source"] = canonical_source
-                    if not str(getattr(row, "source_source_citation", "") or "").strip():
-                        updates["source_source_citation"] = canonical_source
-                if updates:
-                    row = row.model_copy(update=updates)
-            return row, review_metadata
 
-        max_workers = max(1, min(self.settings.row_max_workers, len(payload_rows)))
-        if max_workers <= 1 or len(payload_rows) <= 1:
-            results = [handle(payload) for payload in payload_rows]
+        def stamp_source(row: BaseModel) -> BaseModel:
+            if not (has_source_field and canonical_source):
+                return row
+            updates: dict[str, Any] = {}
+            if not str(getattr(row, "source", "") or "").strip():
+                updates["source"] = canonical_source
+                if not str(getattr(row, "source_source_citation", "") or "").strip():
+                    updates["source_source_citation"] = canonical_source
+            return row.model_copy(update=updates) if updates else row
+
+        def review_batch(built: list[BaseModel], prior_issues: list[list[str]] | None) -> list[tuple[BaseModel, Any]]:
+            if hasattr(self.reviewer, "review_and_fix_batch"):
+                return self.reviewer.review_and_fix_batch(built, parsed_document, planning, prior_issues)
+            return [self.reviewer.review_and_fix(row, parsed_document, planning) for row in built]
+
+        def evaluate_batch(reviewed_rows: list[BaseModel]) -> list[Any]:
+            if hasattr(self.critic, "validate_batch"):
+                return self.critic.validate_batch(reviewed_rows, parsed_document)
+            verdicts: list[Any] = []
+            for row in reviewed_rows:
+                try:
+                    verdicts.append(self.critic.validate(row, parsed_document))
+                except Exception as exc:  # noqa: BLE001 - treated as this row's issue below
+                    verdicts.append(exc)
+            return verdicts
+
+        def verdict_issues(verdict: Any) -> list[str]:
+            if isinstance(verdict, Exception):
+                return [str(verdict)]
+            if getattr(verdict, "tag", "") != "VALID" or not getattr(verdict, "is_valid", False):
+                return list(getattr(verdict, "issues", None) or [getattr(verdict, "confidence_notes", "") or "Row rejected by evaluator."])
+            return []
+
+        def handle_batch(batch: list[BaseModel]) -> tuple[list[tuple[BaseModel, Any]], list[dict[str, Any]]]:
+            # Track each row by its position in the batch across fix passes.
+            active_rows = [build_row(payload) for payload in batch]
+            prior_issues: list[list[str]] = [[] for _ in active_rows]
+            passed: dict[int, tuple[BaseModel, Any]] = {}
+            index_map = list(range(len(active_rows)))  # active position -> original batch index
+
+            for pass_number in range(self.settings.fix_loop_max_passes):
+                issues_arg = prior_issues if any(prior_issues) else None
+                reviewed = review_batch(active_rows, issues_arg)
+                reviewed_rows = [row for row, _ in reviewed]
+                verdicts = evaluate_batch(reviewed_rows)
+
+                next_rows: list[BaseModel] = []
+                next_prior: list[list[str]] = []
+                next_index_map: list[int] = []
+                for pos, ((row, review_metadata), verdict) in enumerate(zip(reviewed, verdicts)):
+                    issues = verdict_issues(verdict)
+                    if not issues:
+                        passed[index_map[pos]] = (stamp_source(row), review_metadata)
+                    else:
+                        next_rows.append(row)
+                        next_prior.append(issues)
+                        next_index_map.append(index_map[pos])
+
+                # Carry only the still-failing rows into the next pass. When none
+                # remain, these lists become empty and the loop ends with no
+                # outstanding failures.
+                active_rows = next_rows
+                prior_issues = next_prior
+                index_map = next_index_map
+                if not active_rows:
+                    break
+
+            # Whatever rows remain in active_rows after the loop never passed.
+            failures: list[dict[str, Any]] = [
+                {"row": active_rows[pos], "issues": prior_issues[pos]}
+                for pos in range(len(active_rows))
+            ]
+
+            ordered_passed = [passed[i] for i in sorted(passed.keys())]
+            return ordered_passed, failures
+
+        batch_size = max(1, self.settings.review_batch_size)
+        batches = [payload_rows[i:i + batch_size] for i in range(0, len(payload_rows), batch_size)]
+
+        max_workers = max(1, min(self.settings.row_max_workers, len(batches)))
+        if max_workers <= 1 or len(batches) <= 1:
+            batch_outputs = [handle_batch(batch) for batch in batches]
         else:
-            indexed: list[tuple[BaseModel, Any] | None] = [None] * len(payload_rows)
+            indexed: list[tuple[list[tuple[BaseModel, Any]], list[dict[str, Any]]] | None] = [None] * len(batches)
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 futures = {
-                    executor.submit(handle, payload): index
-                    for index, payload in enumerate(payload_rows)
+                    executor.submit(handle_batch, batch): index
+                    for index, batch in enumerate(batches)
                 }
-                # Surface the first row failure (fails the whole attempt, as before),
-                # but let in-flight rows settle first.
+                # A batch only raises on an unexpected/infra error (not a rejected
+                # row); surface the first such error but let in-flight batches settle.
                 first_error: Exception | None = None
                 for future in as_completed(futures):
                     index = futures[future]
@@ -269,11 +366,25 @@ class DataTransformationPipeline:
                             first_error = exc
                 if first_error is not None:
                     raise first_error
-            results = [item for item in indexed if item is not None]
+            batch_outputs = [item for item in indexed if item is not None]
 
-        validated_rows = [row for row, _ in results]
-        review_metadata_by_row = [metadata for _, metadata in results]
-        return validated_rows, review_metadata_by_row
+        validated_rows: list[BaseModel] = []
+        review_metadata_by_row: list[Any] = []
+        failed_rows: list[dict[str, Any]] = []
+        for passed_results, failures in batch_outputs:
+            for row, metadata in passed_results:
+                validated_rows.append(row)
+                review_metadata_by_row.append(metadata)
+            failed_rows.extend(failures)
+
+        # Total failure still raises so the outer retry loop (re-extract) fires.
+        if not validated_rows and failed_rows:
+            issue_summary = "; ".join(
+                issue for failure in failed_rows for issue in failure["issues"]
+            )[:400]
+            raise RuntimeError(f"All rows failed evaluation after fix-loop: {issue_summary}")
+
+        return validated_rows, review_metadata_by_row, failed_rows
 
     def watch_forever(self) -> None:
         self._write_monitor_status(status="running", last_error="", last_results=[])
@@ -316,22 +427,56 @@ class DataTransformationPipeline:
             finalization_result.message,
         )
 
-    def _append_rows_to_csv(self, rows: list[BaseModel]) -> None:
+    def _append_rows_to_csv(
+        self, rows: list[BaseModel], row_issues: dict[int, list[str]] | None = None
+    ) -> None:
+        """Append rows to the internal CSV, flagging any unfixed rows.
+
+        `row_issues` maps a row's index (within `rows`) to its outstanding issues;
+        such rows are written with review_status=NEEDS_REVIEW rather than dropped,
+        so the CSV is complete and the human can decide whether to keep them.
+        """
         schema_path = str(self.settings.schema_config_path)
         headers = csv_headers(schema_path)
+        row_issues = row_issues or {}
         display_standard_code_column = self._get_display_standard_code_column(schema_path)
         with self._csv_lock:
+            # Collision resolution reorders/rewrites rows; track issues by identity
+            # so markers stay attached to the right row after any reshuffle.
+            issues_by_id = {id(rows[i]): issues for i, issues in row_issues.items()}
+            # Uniqueness enforcement runs only on clean rows. Flagged NEEDS_REVIEW
+            # rows are excluded so a duplicate/blank code on a problem row cannot
+            # sink the whole write; the human resolves those during review.
+            clean_rows = [row for row in rows if id(row) not in issues_by_id]
             if display_standard_code_column and self._sample_contract_allows_display_code_disambiguation(schema_path):
-                rows = self._resolve_display_standard_code_collisions(rows, schema_path, display_standard_code_column)
+                resolved_clean = self._resolve_display_standard_code_collisions(
+                    clean_rows, schema_path, display_standard_code_column
+                )
+                # Rebuild the row order: resolved clean rows keep their sequence,
+                # flagged rows are appended (they were dropped from clean_rows).
+                flagged_rows = [row for row in rows if id(row) in issues_by_id]
+                rows = resolved_clean + flagged_rows
+                clean_rows = resolved_clean
             if display_standard_code_column:
-                self._assert_unique_display_standard_codes(rows, schema_path, display_standard_code_column)
+                self._assert_unique_display_standard_codes(clean_rows, schema_path, display_standard_code_column)
             write_header = not self.runtime_paths.final_csv_path.exists()
             with self.runtime_paths.final_csv_path.open("a", newline="", encoding="utf-8") as handle:
                 writer = csv.DictWriter(handle, fieldnames=headers)
                 if write_header:
                     writer.writeheader()
                 for row in rows:
-                    writer.writerow(flatten_row(row, schema_path))
+                    issues = issues_by_id.get(id(row))
+                    if issues:
+                        writer.writerow(
+                            flatten_row(
+                                row,
+                                schema_path,
+                                review_status=REVIEW_STATUS_NEEDS_REVIEW,
+                                review_issues=" | ".join(issues),
+                            )
+                        )
+                    else:
+                        writer.writerow(flatten_row(row, schema_path))
 
     def _get_display_standard_code_column(self, schema_path: str) -> str | None:
         for spec in get_schema_fields(schema_path):
@@ -555,6 +700,34 @@ class DataTransformationPipeline:
                 "logged_at_utc": datetime.now(timezone.utc).isoformat(),
             }
         )
+            self.runtime_paths.manual_review_path.write_text(json.dumps(existing, indent=2), encoding="utf-8")
+
+    def _log_failed_rows_manual_review(
+        self, path: Path, parsed_document: Any, failed_rows: list[dict[str, Any]]
+    ) -> None:
+        """Record individual rows that failed the fix-loop, with their issues.
+
+        Unlike _log_manual_review (whole-document failure), this logs specific
+        rows that could not be fixed while the rest of the document succeeded.
+        """
+        if not failed_rows:
+            return
+        with self._manual_review_lock:
+            existing: list[dict[str, Any]] = []
+            if self.runtime_paths.manual_review_path.exists():
+                existing = json.loads(self.runtime_paths.manual_review_path.read_text(encoding="utf-8"))
+            for failure in failed_rows:
+                row = failure.get("row")
+                existing.append(
+                    {
+                        "source_path": str(path),
+                        "document_id": getattr(parsed_document, "document_id", path.stem),
+                        "stage": "row_fix_loop",
+                        "errors": failure.get("issues", []),
+                        "row": schema_only_row_view(row) if row is not None else None,
+                        "logged_at_utc": datetime.now(timezone.utc).isoformat(),
+                    }
+                )
             self.runtime_paths.manual_review_path.write_text(json.dumps(existing, indent=2), encoding="utf-8")
 
     def _already_processed(self, path: Path) -> bool:
