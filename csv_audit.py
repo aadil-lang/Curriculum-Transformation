@@ -19,6 +19,40 @@ from schemas import load_schema_config
 LOGGER = logging.getLogger(__name__)
 
 
+_AUDIT_SYSTEM_PROMPT = (
+    "You are a CSV audit agent. Your job is to confirm that each extracted row is a faithful, "
+    "contract-consistent transformation of its source — and to flag only rows with a concrete, "
+    "demonstrable defect you can point to. Transformation, mapping, inheritance, and source-faithful "
+    "values are expected and correct, not defects. When in doubt, return VALID. Return your response "
+    "as a single JSON object."
+)
+
+_AUDIT_RULES = """
+Default to VALID. Return INVALID only when you can name a CONCRETE, demonstrable problem (quote the
+offending value and say which rule it breaks). Do NOT reject on speculation or vague doubt, and do
+NOT reject a value merely because the sample contract shows no example for that case — if the value
+is faithful to the source and internally consistent, it is acceptable.
+
+Field rules:
+- Audit each row against the source content, not against extraction/metadata requirements.
+- `grade_level` must be exactly one of: Elementary School, Middle School, High School.
+- `display_grade` and `grade_number` carry the source's own band/stage label and MAY be a
+  source-faithful label such as `Stage 5`, `Year 11`, or `Life Skills for Stage 4/5`. Do NOT flag a
+  display_grade/grade_number value just because it is a Life Skills or other band label not shown in
+  the sample — accept it when it reflects the source section the row came from.
+- `Standard code` and `czi_standard_code` may be empty; never flag them solely for being blank.
+- `Display standard code` may be source-faithful or a synthesized/prefixed code (e.g. `DA.1.1`) when
+  needed for uniqueness; flag it only if it is duplicated within the CSV or clearly wrong.
+- `topic` may join multiple source-supported topics with ` | `.
+- Do not require `_source_citation` columns in this audit mode.
+
+Reject ONLY for concrete defects: a value contradicted by the source, wrong field placement /
+row contamination, document noise (headers/footers/nav/page numbers), a truncated or garbled
+description, a duplicated `Display standard code`, or a grade_level that is not one of the three
+allowed buckets.
+""".strip()
+
+
 @dataclass(slots=True)
 class CsvAuditResult:
     audit_csv_path: str
@@ -289,18 +323,7 @@ def _build_audit_messages(raw_row: dict[str, str], parsed_document: Any, schema_
     prompt = f"""
 Audit this extracted CSV row against the original source document and the approved sample contract.
 
-Important audit rules:
-- Audit the row directly from the source link content, not from final extraction metadata requirements.
-- `Standard code` may be empty and must not be flagged solely for being blank.
-- `czi_standard_code` may be empty or absent and must not be flagged solely for being blank or missing.
-- `Display standard code` may be synthetic/transformed or source-faithful if that matches the sample contract.
-- `topic` may contain multiple source-supported topic names joined with ` | ` when one standard genuinely spans multiple topics and the approved sample contract allows that topic style.
-- `Display standard code` must never be duplicated within the same CSV; if duplicates appear, mark every affected row `INVALID`.
-- A prefixed display code such as `DA.1.1` or `TOP.1.1` is acceptable when needed to keep the display code unique and the approved sample contract allows that display-code style.
-- Detect row-level transformation issues such as wrong subject/domain/topic placement, incorrect display-grade logic, noise, row contamination, truncation, bad merges, and unsupported description wording.
-- Do not require `_source_citation` columns in this audit mode.
-- Return `VALID` only if the row is materially consistent with the source and sample contract.
-- Return `INVALID` with explicit issues when any field looks wrong, unsupported, noisy, or structurally mis-mapped.
+{_AUDIT_RULES}
 
 Sample CSV transformation contract:
 {contract_json}
@@ -313,10 +336,7 @@ Original source markdown:
 """.strip()
 
     return [
-        {
-            "role": "system",
-            "content": "You are a strict CSV audit agent. Judge extracted rows against their original source and report concrete row-level issues.",
-        },
+        {"role": "system", "content": _AUDIT_SYSTEM_PROMPT},
         {"role": "user", "content": prompt},
     ]
 
@@ -347,20 +367,9 @@ def _build_batch_audit_messages(
 
     prompt = f"""
 Audit these extracted CSV rows against the original source document and the approved sample contract.
+Return exactly one finding for every input row_number.
 
-Important audit rules:
-- Audit every row directly from the source link content, not from final extraction metadata requirements.
-- Return one finding for every input row_number.
-- `Standard code` may be empty and must not be flagged solely for being blank.
-- `czi_standard_code` may be empty or absent and must not be flagged solely for being blank or missing.
-- `Display standard code` may be synthetic/transformed or source-faithful if that matches the sample contract.
-- `topic` may contain multiple source-supported topic names joined with ` | ` when one standard genuinely spans multiple topics and the approved sample contract allows that topic style.
-- `Display standard code` must never be duplicated within the same CSV; if duplicates appear, mark every affected row `INVALID`.
-- A prefixed display code such as `DA.1.1` or `TOP.1.1` is acceptable when needed to keep the display code unique and the approved sample contract allows that display-code style.
-- Detect row-level transformation issues such as wrong subject/domain/topic placement, incorrect display-grade logic, noise, row contamination, truncation, bad merges, unsupported description wording, and hierarchy mistakes.
-- Do not require `_source_citation` columns in this audit mode.
-- Return `VALID` only if the row is materially consistent with the source and sample contract.
-- Return `INVALID` with explicit issues when any field looks wrong, unsupported, noisy, or structurally mis-mapped.
+{_AUDIT_RULES}
 
 Sample CSV transformation contract:
 {contract_json}
@@ -373,10 +382,7 @@ Original source markdown:
 """.strip()
 
     return [
-        {
-            "role": "system",
-            "content": "You are a strict CSV audit agent. Judge extracted rows against their original source and report concrete row-level issues for each row_number.",
-        },
+        {"role": "system", "content": _AUDIT_SYSTEM_PROMPT},
         {"role": "user", "content": prompt},
     ]
 
