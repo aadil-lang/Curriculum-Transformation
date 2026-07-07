@@ -4,6 +4,9 @@ const state = {
   sampleCsvFile: null,
   samplePreviewSelection: { ref: "A1", value: "" },
   samplePreviewRows: [],
+  cleanCsv: "",
+  cleanCsvName: "extracted.csv",
+  showFinal: false,
   isBusy: false,
   batchPollTimerId: null,
   batchPollName: "",
@@ -18,13 +21,10 @@ const MIN_BUTTON_LOADING_MS = 500;
 const managedButtons = [];
 
 const els = {
-  workspaceSchema: document.getElementById("workspaceSchema"),
-  workspaceBatches: document.getElementById("workspaceBatches"),
-  workspaceInputs: document.getElementById("workspaceInputs"),
-  workspaceSheets: document.getElementById("workspaceSheets"),
   batchName: document.getElementById("batchName"),
   instructions: document.getElementById("instructions"),
   documentFiles: document.getElementById("documentFiles"),
+  sourceUrls: document.getElementById("sourceUrls"),
   sampleCsvFile: document.getElementById("sampleCsvFile"),
   documentList: document.getElementById("documentList"),
   sampleCsvLabel: document.getElementById("sampleCsvLabel"),
@@ -35,14 +35,14 @@ const els = {
   samplePreviewFormula: document.getElementById("samplePreviewFormula"),
   samplePreviewTableWrap: document.getElementById("samplePreviewTableWrap"),
   statusBox: document.getElementById("statusBox"),
-  schemaBox: document.getElementById("schemaBox"),
   schemaPathBox: document.getElementById("schemaPathBox"),
   samplePathBox: document.getElementById("samplePathBox"),
-  outputBox: document.getElementById("outputBox"),
+  resultSummary: document.getElementById("resultSummary"),
+  previewHeading: document.getElementById("previewHeading"),
+  previewMode: document.getElementById("previewMode"),
+  previewPill: document.getElementById("previewPill"),
+  downloadFinalButton: document.getElementById("downloadFinalButton"),
   actionBox: document.getElementById("actionBox"),
-  batchMetaBox: document.getElementById("batchMetaBox"),
-  auditReportBox: document.getElementById("auditReportBox"),
-  manualReviewBox: document.getElementById("manualReviewBox"),
   batchList: document.getElementById("batchList"),
   batchBadge: document.getElementById("batchBadge"),
   generateDraftButton: document.getElementById("generateDraftButton"),
@@ -91,6 +91,7 @@ els.generateDraftButton.addEventListener("click", async () => {
         name: batchName,
         instructions,
         document_files: await encodeFiles(state.documents),
+        source_urls: collectSourceUrls(),
       });
       hydrateBatch(response.batch);
       setStatus(
@@ -123,6 +124,16 @@ els.approveRunButton.addEventListener("click", async () => {
   await runExtractionFromEditorOrUpload(els.approveRunButton);
 });
 
+els.downloadFinalButton.addEventListener("click", async () => {
+  try {
+    await runButtonAction(els.downloadFinalButton, async () => {
+      downloadFinalCsv();
+    });
+  } catch (error) {
+    setStatus(error.message);
+  }
+});
+
 els.auditBatchButton.addEventListener("click", async () => {
   const batchName = normalizedBatchName();
   if (!batchName) {
@@ -135,7 +146,7 @@ els.auditBatchButton.addEventListener("click", async () => {
       const response = await postJson("/api/audit-batch", { name: batchName });
       hydrateBatch(response.batch);
       setActionStatus(JSON.stringify(response.audit, null, 2));
-      await loadWorkspaceSummary();
+      await loadBatchList();
     });
   } catch (error) {
     setActionStatus(error.message);
@@ -197,6 +208,7 @@ async function runExtractionFromEditorOrUpload(triggerButton) {
         sample_csv_name: state.sampleCsvFile ? state.sampleCsvFile.name : "approved_sample.csv",
         sample_csv_content: sampleCsvContent,
         document_files: await encodeFiles(state.documents),
+        source_urls: collectSourceUrls(),
       });
       hydrateBatch(response.batch);
       setStatus(
@@ -223,7 +235,7 @@ async function runSync(triggerButton, sample) {
       const response = await postJson("/api/sync-batch", { name: batchName, sample });
       hydrateBatch(response.batch);
       setActionStatus(JSON.stringify(response.sync, null, 2));
-      await loadWorkspaceSummary();
+      await loadBatchList();
     });
   } catch (error) {
     setActionStatus(error.message);
@@ -255,70 +267,39 @@ function hydrateBatch(batch) {
   els.batchName.value = batch.name;
   els.instructions.value = batch.instructions || els.instructions.value;
   els.sampleCsvEditor.value = batch.approved_sample_csv || batch.sample_template_csv || "";
-  els.schemaBox.textContent = stringifyPretty(batch.schema_config, "No schema yet.");
   els.schemaPathBox.textContent = batch.schema_config_path || "No schema yet.";
   els.samplePathBox.textContent = batch.approved_sample_csv_path || batch.sample_template_path || "No sample yet.";
-  els.outputBox.textContent = batch.final_csv || "No output yet.";
-  els.actionBox.textContent = stringifyPretty(
-    {
-      codex_job_status: batch.codex_job_status,
-      csv_finalization_status: batch.csv_finalization_status,
-      google_sheets_sync_status: batch.google_sheets_sync_status,
-    },
-    "No batch action run yet.",
-  );
-  els.batchMetaBox.textContent = stringifyPretty(
-    {
-      status: batch.status,
-      batch_root: batch.batch_root,
-      document_files: batch.document_files,
-      codex_job_status: batch.codex_job_status,
-      schema_config_path: batch.schema_config_path,
-      approved_sample_csv_path: batch.approved_sample_csv_path,
-      final_csv_path: batch.final_csv_path,
-      latest_audit_report_path: batch.latest_audit_report_path,
-    },
-    "No batch loaded.",
-  );
-  els.auditReportBox.textContent = stringifyPretty(batch.latest_audit_report, "No audit report yet.");
-  els.manualReviewBox.textContent = stringifyPretty(
-    {
-      codex_job_status: batch.codex_job_status,
-      manual_review: batch.manual_review,
-      processing_state: batch.processing_state,
-      monitor_status: batch.monitor_status,
-    },
-    "No manual review entries.",
-  );
+  state.cleanCsv = batch.clean_csv || "";
+  state.cleanCsvName = (batch.clean_csv_path || "").split(/[\\/]/).pop() || `${batch.name || "extracted"}.csv`;
+  // Once extraction has produced output (or the batch has moved past drafting),
+  // the shared preview shows the final CSV read-only; otherwise the editable sample.
+  const extractedStatuses = ["extracted", "manual_review", "queued", "processing"];
+  state.showFinal = Boolean(state.cleanCsv.trim() || batch.final_csv_path) || extractedStatuses.includes(batch.status || "");
+  renderResultSummary(batch.row_summary, state.cleanCsv);
+  els.actionBox.textContent = "";
   els.batchBadge.textContent = batch.status || "Idle";
-  renderSamplePreview(els.sampleCsvEditor.value);
+  renderPreview();
   updateBatchPolling(batch);
   updateButtonAvailability();
 }
 
-async function refreshWorkspace() {
-  await Promise.all([loadBatchList(), loadWorkspaceSummary()]);
+function renderPreview() {
+  if (state.showFinal) {
+    els.previewHeading.textContent = "Extracted CSV";
+    els.previewMode.textContent = "Read-only result";
+    els.previewPill.textContent = "Result";
+    els.samplePreviewTitle.textContent = state.cleanCsvName || "Extracted CSV";
+    renderReadOnlyGrid(els.samplePreviewTableWrap, state.cleanCsv, els.samplePreviewMeta);
+  } else {
+    els.previewHeading.textContent = "Sample Preview";
+    els.previewMode.textContent = "Editable draft";
+    els.previewPill.textContent = "CSV import";
+    renderSamplePreview(els.sampleCsvEditor.value);
+  }
 }
 
-async function loadWorkspaceSummary() {
-  try {
-    const workspace = await getJson("/api/workspace");
-    els.workspaceSchema.textContent = workspace.default_schema_name || "Unknown";
-    els.workspaceBatches.textContent = String(workspace.batch_count ?? 0);
-    els.workspaceInputs.textContent = String(workspace.input_document_count ?? 0);
-    if (!workspace.google_sheets_sync_enabled) {
-      els.workspaceSheets.textContent = "Disabled";
-    } else if (workspace.google_sheets_spreadsheet_id_present) {
-      els.workspaceSheets.textContent = "Configured";
-    } else {
-      els.workspaceSheets.textContent = "Needs Setup";
-    }
-  } catch (error) {
-    els.workspaceSchema.textContent = "Unavailable";
-    els.workspaceBatches.textContent = "-";
-    els.workspaceInputs.textContent = "-";
-    els.workspaceSheets.textContent = "Unavailable";
-  }
+async function refreshWorkspace() {
+  await loadBatchList();
 }
 
 async function loadBatchList() {
@@ -337,11 +318,8 @@ async function loadBatchList() {
       card.innerHTML = `
         <h3>${escapeHtml(batch.name)}</h3>
         <p><span class="mini-badge">${escapeHtml(batch.status)}</span></p>
-        <p>Documents: ${batch.document_count}</p>
-        <p>Schema: ${batch.has_schema ? "Yes" : "No"}</p>
-        <p>Final CSV: ${batch.has_final_csv ? "Yes" : "No"}</p>
-        <p>Updated: ${escapeHtml(batch.updated_at_utc)}</p>
-        <button type="button" data-batch="${escapeHtml(batch.name)}">Open Batch</button>
+        <p>${batch.document_count} doc${batch.document_count === 1 ? "" : "s"}${batch.has_final_csv ? " • CSV ready" : ""}</p>
+        <button type="button" data-batch="${escapeHtml(batch.name)}">Open</button>
       `;
       const openButton = card.querySelector("button");
       enhanceButtonMarkup(openButton);
@@ -431,10 +409,21 @@ function ensureBatchName() {
   return derived;
 }
 
+function collectSourceUrls() {
+  return els.sourceUrls.value
+    .split(/\s+/)
+    .map((url) => url.trim())
+    .filter((url) => /^https?:\/\//i.test(url));
+}
+
 function deriveBatchName() {
   const instructionText = els.instructions.value.trim();
   const documentName = state.documents[0]?.name || state.sampleCsvFile?.name || "";
-  const seed = instructionText || documentName;
+  const firstUrl = collectSourceUrls()[0] || "";
+  const urlSeed = firstUrl
+    ? firstUrl.replace(/^https?:\/\//i, "").split(/[?#]/)[0]
+    : "";
+  const seed = instructionText || documentName || urlSeed;
   if (!seed) {
     return "";
   }
@@ -632,6 +621,126 @@ function renderSamplePreview(csvText) {
   }
 }
 
+function renderResultSummary(summary, csvText) {
+  const el = els.resultSummary;
+  el.classList.remove("summary-ok", "summary-warn");
+  if (!csvText || !csvText.trim()) {
+    el.textContent = "No results yet. Run an extraction to see output here.";
+    return;
+  }
+  const rows = summary?.rows ?? 0;
+  const needsReview = summary?.sources_manual_review ?? 0;
+  const verified = summary?.sources_verified ?? 0;
+  let message = `Extracted ${rows} row${rows === 1 ? "" : "s"}`;
+  if (verified) {
+    message += ` from ${verified} source${verified === 1 ? "" : "s"}`;
+  }
+  message += ".";
+  if (needsReview > 0) {
+    message += ` ${needsReview} source${needsReview === 1 ? "" : "s"} need review.`;
+    el.classList.add("summary-warn");
+  } else {
+    el.classList.add("summary-ok");
+  }
+  el.textContent = message;
+}
+
+function renderReadOnlyGrid(target, csvText, metaEl) {
+  const trimmed = (csvText || "").trim();
+  const setMeta = (text) => { if (metaEl) metaEl.textContent = text; };
+  if (!trimmed) {
+    target.className = "sheet-grid empty-state";
+    target.textContent = "No extracted rows yet.";
+    setMeta("No result yet.");
+    return;
+  }
+  let rows;
+  try {
+    rows = parseCsv(trimmed);
+  } catch (error) {
+    target.className = "sheet-grid empty-state";
+    target.textContent = `Could not render result: ${error.message}`;
+    setMeta("Preview unavailable");
+    return;
+  }
+  if (!rows.length) {
+    target.className = "sheet-grid empty-state";
+    target.textContent = "No extracted rows yet.";
+    setMeta("No result yet.");
+    return;
+  }
+  setMeta(`${Math.max(rows.length - 1, 0)} rows • ${rows[0].length} columns`);
+
+  const header = rows[0];
+  const bodyRows = rows.slice(1);
+  target.className = "sheet-grid";
+  target.innerHTML = "";
+
+  const table = document.createElement("table");
+  table.className = "sheet-table";
+
+  const columnGroup = document.createElement("colgroup");
+  const rowNumberCol = document.createElement("col");
+  rowNumberCol.className = "sheet-row-index-col";
+  columnGroup.appendChild(rowNumberCol);
+  for (const columnName of header) {
+    const col = document.createElement("col");
+    col.style.width = `${estimateColumnWidth(columnName)}px`;
+    columnGroup.appendChild(col);
+  }
+  table.appendChild(columnGroup);
+
+  const thead = document.createElement("thead");
+  const headerRow = document.createElement("tr");
+  const corner = document.createElement("th");
+  corner.className = "sheet-corner";
+  headerRow.appendChild(corner);
+  for (const columnName of header) {
+    const th = document.createElement("th");
+    th.className = "sheet-column-letter";
+    th.textContent = columnName;
+    headerRow.appendChild(th);
+  }
+  thead.appendChild(headerRow);
+
+  const tbody = document.createElement("tbody");
+  bodyRows.forEach((row, rowIndex) => {
+    const tr = document.createElement("tr");
+    const rowHeader = document.createElement("th");
+    rowHeader.className = "sheet-row-number";
+    rowHeader.textContent = String(rowIndex + 1);
+    tr.appendChild(rowHeader);
+    for (let columnIndex = 0; columnIndex < header.length; columnIndex += 1) {
+      const cell = document.createElement("td");
+      cell.className = "sheet-cell";
+      cell.textContent = row[columnIndex] || "";
+      tr.appendChild(cell);
+    }
+    tbody.appendChild(tr);
+  });
+
+  table.appendChild(thead);
+  table.appendChild(tbody);
+  target.appendChild(table);
+}
+
+function downloadFinalCsv() {
+  if (!state.cleanCsv.trim()) {
+    setStatus("No extracted CSV is available to download yet.");
+    return;
+  }
+  const blob = new Blob([state.cleanCsv], { type: "text/csv;charset=utf-8" });
+  const objectUrl = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = objectUrl;
+  anchor.download = state.cleanCsvName || "extracted.csv";
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(objectUrl);
+  setStatus(`Downloaded ${state.cleanCsvName}.`);
+}
+
 function resolveSamplePreviewTitle() {
   const samplePath = els.samplePathBox.textContent.trim();
   if (samplePath && samplePath !== "No sample yet.") {
@@ -807,6 +916,7 @@ function initializeManagedButtons() {
     els.generateDraftButton,
     els.runExtractionButton,
     els.downloadSampleButton,
+    els.downloadFinalButton,
     els.approveRunButton,
     els.auditBatchButton,
     els.syncFinalButton,
@@ -903,6 +1013,7 @@ function updateButtonAvailability() {
   els.generateDraftButton.disabled = state.isBusy;
   els.runExtractionButton.disabled = state.isBusy;
   els.downloadSampleButton.disabled = state.isBusy || !hasSample;
+  els.downloadFinalButton.disabled = state.isBusy || !state.cleanCsv.trim();
   els.approveRunButton.disabled = state.isBusy || !hasSample;
   els.auditBatchButton.disabled = state.isBusy || !state.batchCapabilities.hasFinalCsv;
   els.syncFinalButton.disabled = state.isBusy || !state.batchCapabilities.hasFinalCsv;
@@ -989,5 +1100,6 @@ function escapeHtml(value) {
 initializeManagedButtons();
 renderDocumentList();
 renderSamplePreview("");
+renderResultSummary(null, "");
 updateButtonAvailability();
 refreshWorkspace();

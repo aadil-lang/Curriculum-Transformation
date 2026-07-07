@@ -97,6 +97,7 @@ class UiRequestHandler(BaseHTTPRequestHandler):
             raise ValueError("Instructions are required to generate a draft sample CSV.")
 
         document_files = persist_document_uploads(batch_name, payload.get("document_files", []))
+        source_urls = _parse_source_urls(payload.get("source_urls"))
         write_batch_manifest(
             batch_name=batch_name,
             instructions=instructions,
@@ -128,7 +129,7 @@ class UiRequestHandler(BaseHTTPRequestHandler):
             batches=[
                 ChatBatchSpec(
                     name=batch_name,
-                    input_files=[str(path) for path in document_files],
+                    input_files=[*(str(path) for path in document_files), *source_urls],
                     draft_only=True,
                     sample_row_target=_derive_requested_sample_row_target(instructions),
                 )
@@ -146,8 +147,9 @@ class UiRequestHandler(BaseHTTPRequestHandler):
         document_files = persist_document_uploads(batch_name, payload.get("document_files", []))
         if not document_files:
             document_files = list_existing_document_files(batch_name)
-        if not document_files:
-            raise ValueError("At least one source document is required before extraction can run.")
+        source_urls = _parse_source_urls(payload.get("source_urls"))
+        if not document_files and not source_urls:
+            raise ValueError("At least one source document or URL is required before extraction can run.")
 
         sample_csv_content = str(payload.get("sample_csv_content", "")).strip()
         sample_csv_name = str(payload.get("sample_csv_name", "")).strip() or "approved_sample.csv"
@@ -171,6 +173,7 @@ class UiRequestHandler(BaseHTTPRequestHandler):
                 payload={
                     "instructions": instructions,
                     "document_files": [path.name for path in document_files],
+                    "source_urls": source_urls,
                     "sample_csv_path": str(sample_csv_path),
                     "output_csv_name": str(payload.get("output_csv_name", "")).strip() or "",
                 },
@@ -190,7 +193,7 @@ class UiRequestHandler(BaseHTTPRequestHandler):
             batches=[
                 ChatBatchSpec(
                     name=batch_name,
-                    input_files=[str(path) for path in document_files],
+                    input_files=[*(str(path) for path in document_files), *source_urls],
                     sample_csv=str(sample_csv_path),
                     output_csv_name=str(payload.get("output_csv_name", "")).strip() or None,
                 )
@@ -326,6 +329,24 @@ def validate_batch_name(raw_value: Any) -> str:
     if not VALID_BATCH_NAME.fullmatch(batch_name):
         raise ValueError("Batch name may only contain letters, numbers, dashes, and underscores.")
     return batch_name
+
+
+def _parse_source_urls(raw_value: Any) -> list[str]:
+    """Accept source URLs as a list or a newline/whitespace-separated string."""
+    if not raw_value:
+        return []
+    if isinstance(raw_value, str):
+        candidates = raw_value.split()
+    elif isinstance(raw_value, list):
+        candidates = [str(item) for item in raw_value]
+    else:
+        return []
+    urls: list[str] = []
+    for candidate in candidates:
+        url = candidate.strip()
+        if url.lower().startswith(("http://", "https://")):
+            urls.append(url)
+    return urls
 
 
 def _derive_requested_sample_row_target(instructions: str) -> int | None:
@@ -475,6 +496,7 @@ def load_batch_detail(batch_name: str) -> dict[str, Any]:
     output_dir = batch_root / "output"
     manifest = read_json_if_exists(batch_root / "ui_manifest.json", {})
     output_csv = find_output_csv(output_dir)
+    clean_output_csv = find_clean_output_csv(output_dir)
     approved_sample_csv = find_existing_sample_csv(batch_name)
     sample_template_path = output_dir / "sample_output_template.csv"
     schema_config_path = output_dir / "schema_config.json"
@@ -500,6 +522,9 @@ def load_batch_detail(batch_name: str) -> dict[str, Any]:
         "approved_sample_csv_path": str(approved_sample_csv) if approved_sample_csv else "",
         "final_csv": read_text_if_exists(output_csv) if output_csv else "",
         "final_csv_path": str(output_csv) if output_csv else "",
+        "clean_csv": read_text_if_exists(clean_output_csv) if clean_output_csv else "",
+        "clean_csv_path": str(clean_output_csv) if clean_output_csv else "",
+        "row_summary": _compute_row_summary(output_dir, clean_output_csv or output_csv),
         "manual_review": read_json_if_exists(output_dir / "manual_review.json", []),
         "processing_state": read_json_if_exists(output_dir / "processing_state.json", {}),
         "monitor_status": read_json_if_exists(output_dir / "monitor_status.json", {}),
@@ -538,10 +563,51 @@ def derive_batch_status(batch_root: Path) -> str:
 
 
 def find_output_csv(output_dir: Path) -> Path | None:
+    """The full extracted CSV (with citation/metadata columns) for a batch."""
     if not output_dir.exists():
         return None
-    csv_candidates = sorted(path for path in output_dir.glob("*.csv") if path.name != "sample_output_template.csv")
-    return csv_candidates[0] if csv_candidates else None
+    candidates = [
+        path
+        for path in sorted(output_dir.glob("*.csv"))
+        if path.name != "sample_output_template.csv" and not path.name.endswith(".clean.csv")
+    ]
+    return candidates[0] if candidates else None
+
+
+def find_clean_output_csv(output_dir: Path) -> Path | None:
+    """The clean, schema-only deliverable CSV (<name>.clean.csv) for a batch."""
+    if not output_dir.exists():
+        return None
+    candidates = sorted(output_dir.glob("*.clean.csv"))
+    return candidates[0] if candidates else None
+
+
+def _compute_row_summary(output_dir: Path, csv_path: Path | None) -> dict[str, int]:
+    """Plain-language counts for the end-user result summary."""
+    rows = 0
+    verified_sources: set[str] = set()
+    if csv_path and csv_path.exists():
+        import csv as _csv
+
+        with csv_path.open(newline="", encoding="utf-8-sig") as handle:
+            for row in _csv.DictReader(handle):
+                rows += 1
+                src = (row.get("source") or row.get("source_document") or "").strip()
+                if src:
+                    verified_sources.add(src)
+
+    manual_review = read_json_if_exists(output_dir / "manual_review.json", [])
+    manual_sources = {
+        str(entry.get("source_path") or entry.get("document_id") or index)
+        for index, entry in enumerate(manual_review)
+    } if isinstance(manual_review, list) else set()
+
+    return {
+        "rows": rows,
+        "sources_verified": len(verified_sources),
+        "sources_manual_review": len(manual_sources),
+        "sources_total": len(verified_sources) + len(manual_sources),
+    }
 
 
 def read_text_if_exists(path: Path | None) -> str:

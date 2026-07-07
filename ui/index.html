@@ -3,38 +3,15 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Document to CSV Studio</title>
+    <title>Curriculum Data Transformation</title>
     <link rel="stylesheet" href="/styles.css">
   </head>
   <body>
     <div class="page-shell">
       <header class="hero">
-        <p class="eyebrow">Codex Workspace UI</p>
-        <h1>Document to CSV Studio</h1>
-        <p class="lede">
-          Upload documents, draft a sample CSV from your instructions, approve the template,
-          then run full extraction without leaving this workspace.
-        </p>
+        <p class="eyebrow">Data Transformation Workspace</p>
+        <h1>Curriculum Data Transformation</h1>
       </header>
-
-      <section class="workspace-strip">
-        <div class="summary-card">
-          <span class="summary-label">Default Schema</span>
-          <strong id="workspaceSchema">Loading…</strong>
-        </div>
-        <div class="summary-card">
-          <span class="summary-label">Batches</span>
-          <strong id="workspaceBatches">0</strong>
-        </div>
-        <div class="summary-card">
-          <span class="summary-label">Input Docs</span>
-          <strong id="workspaceInputs">0</strong>
-        </div>
-        <div class="summary-card">
-          <span class="summary-label">Sheets Sync</span>
-          <strong id="workspaceSheets">Unknown</strong>
-        </div>
-      </section>
 
       <main class="layout">
         <div class="layout-top">
@@ -56,9 +33,14 @@
 
             <label class="field file-field">
               <span>Source documents</span>
-              <input id="documentFiles" type="file" multiple accept=".pdf,.docx,.txt,.url,.webloc">
+              <input id="documentFiles" type="file" multiple accept=".pdf,.docx,.doc">
             </label>
             <div id="documentList" class="chip-list"></div>
+
+            <label class="field">
+              <span>Source URLs</span>
+              <textarea id="sourceUrls" rows="4" placeholder="One curriculum/document URL per line (https://...). Used instead of or alongside uploaded files."></textarea>
+            </label>
 
             <label class="field file-field">
               <span>Optional sample CSV</span>
@@ -89,9 +71,9 @@
 
           <section class="panel panel-preview">
             <div class="section-head sample-preview-panel-head">
-              <h2>Sample Preview</h2>
+              <h2 id="previewHeading">Sample Preview</h2>
               <div class="preview-head-actions">
-                <span class="inline-note">Spreadsheet view</span>
+                <span id="previewMode" class="inline-note">Editable draft</span>
                 <button id="refreshButton" class="ghost">Refresh Batch</button>
               </div>
             </div>
@@ -100,7 +82,7 @@
                 <div class="sheet-toolbar">
                   <div id="samplePreviewTitle" class="sheet-title">Sample-S.csv</div>
                   <div class="sheet-toolbar-actions">
-                    <span class="sheet-pill">CSV import</span>
+                    <span id="previewPill" class="sheet-pill">CSV import</span>
                     <span id="samplePreviewMeta" class="sheet-toolbar-meta">No sample preview yet.</span>
                   </div>
                 </div>
@@ -114,54 +96,37 @@
             </div>
             <div class="button-row preview-action-row">
               <button id="downloadSampleButton" class="ghost" disabled>Download Sample CSV</button>
+              <button id="downloadFinalButton" class="ghost" disabled>Download Extracted CSV</button>
               <button id="approveRunButton" class="accent" disabled>Approve Draft and Run Extraction</button>
             </div>
             <pre id="statusBox" class="status-inline">Waiting for a batch.</pre>
           </section>
         </div>
 
-        <section class="panel panel-output">
-          <div class="section-head">
-            <h2>Outputs</h2>
-            <button id="reloadBatchesButton" class="ghost">Reload History</button>
-          </div>
-          <div class="output-grid">
-            <div class="output-card">
-              <h3>Schema</h3>
-              <pre id="schemaBox">No schema yet.</pre>
+        <div class="layout-bottom">
+          <section class="panel panel-output">
+            <div class="section-head">
+              <h2>Results</h2>
             </div>
-            <div class="output-card">
-              <h3>Final CSV</h3>
-              <pre id="outputBox">No output yet.</pre>
-            </div>
-            <div class="output-card">
-              <h3>Batch Actions</h3>
-              <div class="action-stack">
-                <button id="auditBatchButton" class="secondary" disabled>Audit Extracted CSV</button>
-                <button id="syncFinalButton" class="secondary" disabled>Sync Final CSV to Sheets</button>
-                <button id="syncSampleButton" class="ghost" disabled>Sync Approved Sample to Sheets</button>
-              </div>
-              <pre id="actionBox">No batch action run yet.</pre>
-            </div>
-            <div class="output-card">
-              <h3>Batch Metadata</h3>
-              <pre id="batchMetaBox">No batch loaded.</pre>
-            </div>
-          </div>
-          <div class="output-card output-wide">
-            <h3>Manual Review / State</h3>
-            <pre id="manualReviewBox">No manual review entries.</pre>
-          </div>
-          <div class="output-card output-wide">
-            <h3>Latest Audit Report</h3>
-            <pre id="auditReportBox">No audit report yet.</pre>
-          </div>
-        </section>
 
-        <aside class="panel panel-sidebar">
-          <h2>Recent Batches</h2>
-          <div id="batchList" class="batch-list"></div>
-        </aside>
+            <div id="resultSummary" class="result-summary">No results yet. Run an extraction to see output here.</div>
+
+            <div class="action-row">
+              <button id="auditBatchButton" class="secondary" disabled>Audit</button>
+              <button id="syncFinalButton" class="secondary" disabled>Sync Final</button>
+              <button id="syncSampleButton" class="ghost" disabled>Sync Sample</button>
+            </div>
+            <div id="actionBox" class="action-status"></div>
+          </section>
+
+          <aside class="panel panel-sidebar">
+            <div class="section-head">
+              <h2>Recent Batches</h2>
+              <button id="reloadBatchesButton" class="ghost">Reload</button>
+            </div>
+            <div id="batchList" class="batch-list"></div>
+          </aside>
+        </div>
       </main>
 
       <div class="hidden-support">
