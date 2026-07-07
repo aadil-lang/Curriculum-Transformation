@@ -41,6 +41,9 @@ Requirements:
 - Python 3.12+
 - a virtual environment
 - provider credentials for extraction and critic calls
+- **System tools (not pip-installable):**
+  - **LibreOffice** — converts legacy `.doc` syllabuses to `.docx` for parsing (`soffice --headless`). Install with `brew install --cask libreoffice` (macOS) or your package manager. Only needed if you extract from `.doc` files.
+  - **Playwright browsers** — used by Crawl4AI to scrape webpage sources. Installed via `crawl4ai-setup` (below).
 
 Suggested setup:
 
@@ -50,10 +53,13 @@ cd Curriculum-Transformation
 python3.12 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+crawl4ai-setup                 # installs the Playwright browsers Crawl4AI needs
 cp .env.example .env
 python main.py bootstrap
 python main.py verify
 ```
+
+For `.doc` support, also install LibreOffice (see System tools above).
 
 ## Environment Variables
 

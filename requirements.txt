@@ -1,3 +1,6 @@
+# Python packages only. Two system tools are also required (not pip-installable):
+#   - LibreOffice (soffice)  -> legacy .doc parsing;  brew install --cask libreoffice
+#   - Playwright browsers    -> web scraping via crawl4ai;  run `crawl4ai-setup` after install
 crawl4ai>=0.4.247
 PyMuPDF>=1.24.9
 python-docx>=1.1.2
