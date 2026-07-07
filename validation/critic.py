@@ -230,6 +230,7 @@ Original document markdown:
                 response_model=SemanticAuditVerdict,
                 messages=self._build_audit_messages(row, parsed_document),
                 max_concurrency=self.settings.llm_max_concurrency,
+                fallbacks=self.settings.critic_fallbacks,
             )
         except Exception as exc:
             LOGGER.exception(

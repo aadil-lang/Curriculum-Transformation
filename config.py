@@ -50,6 +50,26 @@ os.environ.setdefault("CRAWL4_AI_BASE_DIRECTORY", str(RUNTIME_DIR))
 os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", str(PLAYWRIGHT_BROWSERS_DIR))
 
 
+# Cross-cloud failover targets for a stage, as "provider|model,provider|model".
+# Each Claude model is named differently per cloud (Vertex: anthropic.claude-opus-4-6;
+# Azure Sweden: claude-opus-4-6), so provider AND model are specified per target.
+DEFAULT_EXTRACTOR_FALLBACKS = "@swedencentral-anthropic|claude-opus-4-6"
+DEFAULT_CRITIC_FALLBACKS = "@swedencentral-anthropic|claude-opus-4-6"
+
+
+def parse_provider_fallbacks(raw: str) -> list[tuple[str, str]]:
+    targets: list[tuple[str, str]] = []
+    for entry in raw.split(","):
+        entry = entry.strip()
+        if not entry or "|" not in entry:
+            continue
+        provider, model = entry.split("|", 1)
+        provider, model = provider.strip(), model.strip()
+        if provider and model:
+            targets.append((provider, model))
+    return targets
+
+
 @dataclass(slots=True)
 class Settings:
     extractor_model: str = field(default_factory=lambda: os.getenv("EXTRACTOR_MODEL", "gemini-3.5-flash"))
@@ -64,6 +84,16 @@ class Settings:
     )
     portkey_critic_provider: str = field(
         default_factory=lambda: os.getenv("PORTKEY_CRITIC_PROVIDER", "")
+    )
+    extractor_fallbacks: list[tuple[str, str]] = field(
+        default_factory=lambda: parse_provider_fallbacks(
+            os.getenv("EXTRACTOR_FALLBACKS", DEFAULT_EXTRACTOR_FALLBACKS)
+        )
+    )
+    critic_fallbacks: list[tuple[str, str]] = field(
+        default_factory=lambda: parse_provider_fallbacks(
+            os.getenv("CRITIC_FALLBACKS", DEFAULT_CRITIC_FALLBACKS)
+        )
     )
     watch_interval_seconds: float = field(default_factory=lambda: float(os.getenv("WATCH_INTERVAL_SECONDS", "10")))
     max_retries: int = field(default_factory=lambda: int(os.getenv("MAX_RETRIES", "2")))

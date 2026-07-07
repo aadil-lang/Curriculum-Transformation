@@ -686,6 +686,7 @@ Source markdown:
                 messages=messages,
                 max_tokens=32000,
                 max_concurrency=self.settings.llm_max_concurrency,
+                fallbacks=self.settings.extractor_fallbacks,
             )
         except Exception as exc:
             LOGGER.exception(

@@ -253,6 +253,7 @@ Original document markdown:
                 response_model=response_model,
                 messages=messages,
                 max_concurrency=self.settings.llm_max_concurrency,
+                fallbacks=self.settings.critic_fallbacks,
             )
         except Exception as exc:
             LOGGER.exception(

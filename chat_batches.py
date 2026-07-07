@@ -300,6 +300,8 @@ def create_model_settings(settings: Settings, schema_path: Path) -> Settings:
         critic_model=settings.critic_model,
         portkey_extractor_provider=settings.portkey_extractor_provider,
         portkey_critic_provider=settings.portkey_critic_provider,
+        extractor_fallbacks=settings.extractor_fallbacks,
+        critic_fallbacks=settings.critic_fallbacks,
         watch_interval_seconds=settings.watch_interval_seconds,
         max_retries=settings.max_retries,
         extraction_max_workers=settings.extraction_max_workers,

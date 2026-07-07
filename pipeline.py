@@ -615,6 +615,8 @@ class DataTransformationPipeline:
             critic_model=refreshed_settings.critic_model,
             portkey_extractor_provider=refreshed_settings.portkey_extractor_provider,
             portkey_critic_provider=refreshed_settings.portkey_critic_provider,
+            extractor_fallbacks=refreshed_settings.extractor_fallbacks,
+            critic_fallbacks=refreshed_settings.critic_fallbacks,
             watch_interval_seconds=refreshed_settings.watch_interval_seconds,
             max_retries=refreshed_settings.max_retries,
             extraction_max_workers=refreshed_settings.extraction_max_workers,
