@@ -68,14 +68,18 @@ class TransformationReviewer:
                 data[key] = normalized
                 fixes.append(f"Trimmed surrounding whitespace in '{key}'.")
 
-        grade_number_field = output_to_internal.get("grade_number")
-        if grade_number_field:
-            grade_number_value = data.get(grade_number_field)
-            normalized_grade_numbers = _normalize_grade_number_value(grade_number_value)
-            if normalized_grade_numbers and normalized_grade_numbers != grade_number_value:
-                data[grade_number_field] = normalized_grade_numbers
+        # A sample may use either 'grade_number' or 'grade_string' for the expanded
+        # grade list; normalize whichever one the schema actually has.
+        for grade_field_key in ("grade_number", "grade_string"):
+            grade_field = output_to_internal.get(grade_field_key)
+            if not grade_field:
+                continue
+            grade_value = data.get(grade_field)
+            normalized_grades = _normalize_grade_number_value(grade_value)
+            if normalized_grades and normalized_grades != grade_value:
+                data[grade_field] = normalized_grades
                 fixes.append(
-                    f"Normalized grade_number '{grade_number_value}' to '{normalized_grade_numbers}'."
+                    f"Normalized {grade_field_key} '{grade_value}' to '{normalized_grades}'."
                 )
 
         grade_level_field = output_to_internal.get("grade_level")

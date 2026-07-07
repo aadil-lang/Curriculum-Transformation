@@ -211,7 +211,7 @@ def status_command() -> int:
                 "count": len(list(audit_dir.glob("*.audit_report.json"))) if audit_dir.exists() else 0,
             },
             "monitor_status": monitor_status,
-            "batch_runner": batch_summaries,
+            "chat_batches": batch_summaries,
             "next_actions": [
                 "Use a sample CSV from chat when one is provided.",
                 "Otherwise use the workspace default schema for extraction runs.",

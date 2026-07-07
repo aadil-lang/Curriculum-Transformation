@@ -28,7 +28,7 @@ from schemas import (
 )
 
 
-CHAT_BATCH_OUTPUT_DIR = ROOT_DIR / "output" / "batch_runner"
+CHAT_BATCH_OUTPUT_DIR = ROOT_DIR / "output" / "chat_batches"
 URL_PATTERN = re.compile(r"^https?://", re.IGNORECASE)
 DOWNLOADABLE_REMOTE_SUFFIXES = {".pdf", ".docx", ".doc", ".csv"}
 DIRECT_DOCUMENT_SUFFIXES = {".pdf", ".docx", ".doc"}
@@ -941,7 +941,7 @@ def _expand_contract_sample_value(header: str, value: str, index: int) -> str:
         return _increment_code_suffix(value, index - 1)
     if lowered_header == "description":
         return value
-    if lowered_header in {"subject", "domain", "topic", "l3", "l4", "l5", "grade_level", "display_grade", "grade_number", "czi_standard_code"}:
+    if lowered_header in {"subject", "domain", "topic", "l3", "l4", "l5", "grade_level", "display_grade", "grade_number", "grade_string", "czi_standard_code"}:
         return value
     return _expand_example_value(value, index)
 

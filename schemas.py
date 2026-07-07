@@ -49,6 +49,7 @@ DERIVED_FIELD_NAMES = frozenset(
         "grade_level",
         "display_grade",
         "grade_number",
+        "grade_string",
         "subject",
         "domain",
         "topic",
