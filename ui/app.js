@@ -21,7 +21,7 @@ const MIN_BUTTON_LOADING_MS = 500;
 const managedButtons = [];
 
 const els = {
-  batchName: document.getElementById("batchName"),
+  batchNameDisplay: document.getElementById("batchNameDisplay"),
   instructions: document.getElementById("instructions"),
   documentFiles: document.getElementById("documentFiles"),
   sourceUrls: document.getElementById("sourceUrls"),
@@ -38,6 +38,8 @@ const els = {
   schemaPathBox: document.getElementById("schemaPathBox"),
   samplePathBox: document.getElementById("samplePathBox"),
   resultSummary: document.getElementById("resultSummary"),
+  sampleActions: document.getElementById("sampleActions"),
+  resultActions: document.getElementById("resultActions"),
   previewHeading: document.getElementById("previewHeading"),
   previewMode: document.getElementById("previewMode"),
   previewPill: document.getElementById("previewPill"),
@@ -77,7 +79,6 @@ els.sampleCsvFile.addEventListener("change", async (event) => {
 });
 
 els.generateDraftButton.addEventListener("click", async () => {
-  const batchName = ensureBatchName();
   const instructions = els.instructions.value.trim();
   if (!instructions) {
     setStatus("Instructions are required to draft a sample CSV.");
@@ -88,7 +89,7 @@ els.generateDraftButton.addEventListener("click", async () => {
   try {
     await runButtonAction(els.generateDraftButton, async () => {
       const response = await postJson("/api/draft-sample", {
-        name: batchName,
+        name: state.currentBatch || "",
         instructions,
         document_files: await encodeFiles(state.documents),
         source_urls: collectSourceUrls(),
@@ -187,15 +188,13 @@ els.reloadBatchesButton.addEventListener("click", async () => {
 });
 
 async function runExtractionFromEditorOrUpload(triggerButton) {
-  const batchName = ensureBatchName();
-  if (!batchName) {
-    setStatus("Add instructions or a document so the app can create a batch name.");
-    return;
-  }
-
   const sampleCsvContent = els.sampleCsvEditor.value.trim();
   if (!sampleCsvContent) {
     setStatus("Approve or upload a sample CSV before extraction.");
+    return;
+  }
+  if (!state.documents.length && !collectSourceUrls().length) {
+    setStatus("Add a source document or URL before extraction.");
     return;
   }
 
@@ -203,7 +202,7 @@ async function runExtractionFromEditorOrUpload(triggerButton) {
   try {
     await runButtonAction(triggerButton, async () => {
       const response = await postJson("/api/run-extraction", {
-        name: batchName,
+        name: state.currentBatch || "",
         instructions: els.instructions.value.trim(),
         sample_csv_name: state.sampleCsvFile ? state.sampleCsvFile.name : "approved_sample.csv",
         sample_csv_content: sampleCsvContent,
@@ -264,7 +263,10 @@ function hydrateBatch(batch) {
   state.currentBatch = batch.name;
   state.batchCapabilities.hasFinalCsv = Boolean(batch.final_csv_path);
   state.batchCapabilities.hasSampleArtifact = Boolean(batch.approved_sample_csv_path || batch.sample_template_path);
-  els.batchName.value = batch.name;
+  if (batch.name) {
+    els.batchNameDisplay.hidden = false;
+    els.batchNameDisplay.textContent = `Extraction: ${batch.name}`;
+  }
   els.instructions.value = batch.instructions || els.instructions.value;
   els.sampleCsvEditor.value = batch.approved_sample_csv || batch.sample_template_csv || "";
   els.schemaPathBox.textContent = batch.schema_config_path || "No schema yet.";
@@ -290,11 +292,17 @@ function renderPreview() {
     els.previewPill.textContent = "Result";
     els.samplePreviewTitle.textContent = state.cleanCsvName || "Extracted CSV";
     renderReadOnlyGrid(els.samplePreviewTableWrap, state.cleanCsv, els.samplePreviewMeta);
+    els.sampleActions.hidden = true;
+    els.resultActions.hidden = false;
+    els.resultSummary.hidden = false;
   } else {
     els.previewHeading.textContent = "Sample Preview";
     els.previewMode.textContent = "Editable draft";
     els.previewPill.textContent = "CSV import";
     renderSamplePreview(els.sampleCsvEditor.value);
+    els.sampleActions.hidden = false;
+    els.resultActions.hidden = true;
+    els.resultSummary.hidden = true;
   }
 }
 
@@ -391,22 +399,7 @@ function clearBatchPolling() {
 }
 
 function normalizedBatchName() {
-  return els.batchName.value.trim();
-}
-
-function ensureBatchName() {
-  const existing = normalizedBatchName();
-  if (existing) {
-    return existing;
-  }
-
-  const derived = deriveBatchName();
-  if (!derived) {
-    return "";
-  }
-
-  els.batchName.value = derived;
-  return derived;
+  return state.currentBatch || "";
 }
 
 function collectSourceUrls() {
@@ -414,33 +407,6 @@ function collectSourceUrls() {
     .split(/\s+/)
     .map((url) => url.trim())
     .filter((url) => /^https?:\/\//i.test(url));
-}
-
-function deriveBatchName() {
-  const instructionText = els.instructions.value.trim();
-  const documentName = state.documents[0]?.name || state.sampleCsvFile?.name || "";
-  const firstUrl = collectSourceUrls()[0] || "";
-  const urlSeed = firstUrl
-    ? firstUrl.replace(/^https?:\/\//i, "").split(/[?#]/)[0]
-    : "";
-  const seed = instructionText || documentName || urlSeed;
-  if (!seed) {
-    return "";
-  }
-
-  const cleaned = seed
-    .toLowerCase()
-    .replace(/\.[a-z0-9]+$/i, "")
-    .replace(/[^a-z0-9]+/g, "_")
-    .replace(/^_+|_+$/g, "")
-    .slice(0, 48)
-    .replace(/^_+|_+$/g, "");
-
-  if (!cleaned) {
-    return "";
-  }
-
-  return cleaned;
 }
 
 function setStatus(message) {
@@ -481,7 +447,7 @@ function resolveSampleDownloadFilename() {
     }
   }
 
-  const batchName = ensureBatchName();
+  const batchName = normalizedBatchName();
   if (batchName) {
     return `${batchName}-S.csv`;
   }
@@ -1099,7 +1065,7 @@ function escapeHtml(value) {
 
 initializeManagedButtons();
 renderDocumentList();
-renderSamplePreview("");
 renderResultSummary(null, "");
+renderPreview();
 updateButtonAvailability();
 refreshWorkspace();

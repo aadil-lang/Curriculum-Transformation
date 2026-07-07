@@ -101,8 +101,7 @@ body::after {
 }
 
 .panel-form,
-.panel-preview,
-.panel-output {
+.panel-preview {
   min-width: 0;
 }
 
@@ -116,12 +115,9 @@ body::after {
 
 .layout-bottom {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(320px, 0.9fr);
   gap: 18px;
-  align-items: start;
 }
 
-.panel-output,
 .panel-sidebar {
   min-width: 0;
   padding: 18px;
@@ -676,16 +672,6 @@ pre {
   margin: 4px 0;
   color: var(--muted);
   font-size: 0.78rem;
-}
-
-.action-row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.action-row button {
-  flex: 1 1 auto;
 }
 
 .mini-badge {

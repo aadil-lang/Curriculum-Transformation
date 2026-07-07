@@ -91,13 +91,18 @@ class UiRequestHandler(BaseHTTPRequestHandler):
         LOGGER.info("UI %s - %s", self.address_string(), format % args)
 
     def _handle_draft_sample(self, payload: dict[str, Any]) -> dict[str, Any]:
-        batch_name = validate_batch_name(payload.get("name"))
         instructions = str(payload.get("instructions", "")).strip()
         if not instructions:
             raise ValueError("Instructions are required to generate a draft sample CSV.")
 
-        document_files = persist_document_uploads(batch_name, payload.get("document_files", []))
         source_urls = _parse_source_urls(payload.get("source_urls"))
+        upload_names = [str(item.get("name", "")) for item in (payload.get("document_files") or [])]
+        batch_name = _resolve_batch_name(
+            payload.get("name"),
+            source_urls=source_urls,
+            document_files=upload_names,
+        )
+        document_files = persist_document_uploads(batch_name, payload.get("document_files", []))
         write_batch_manifest(
             batch_name=batch_name,
             instructions=instructions,
@@ -142,16 +147,22 @@ class UiRequestHandler(BaseHTTPRequestHandler):
         }
 
     def _handle_run_extraction(self, payload: dict[str, Any]) -> dict[str, Any]:
-        batch_name = validate_batch_name(payload.get("name"))
         instructions = str(payload.get("instructions", "")).strip()
+        source_urls = _parse_source_urls(payload.get("source_urls"))
+        sample_csv_content = str(payload.get("sample_csv_content", "")).strip()
+        upload_names = [str(item.get("name", "")) for item in (payload.get("document_files") or [])]
+        batch_name = _resolve_batch_name(
+            payload.get("name"),
+            sample_csv_content=sample_csv_content,
+            source_urls=source_urls,
+            document_files=upload_names,
+        )
         document_files = persist_document_uploads(batch_name, payload.get("document_files", []))
         if not document_files:
             document_files = list_existing_document_files(batch_name)
-        source_urls = _parse_source_urls(payload.get("source_urls"))
         if not document_files and not source_urls:
             raise ValueError("At least one source document or URL is required before extraction can run.")
 
-        sample_csv_content = str(payload.get("sample_csv_content", "")).strip()
         sample_csv_name = str(payload.get("sample_csv_name", "")).strip() or "approved_sample.csv"
         if sample_csv_content:
             sample_csv_path = persist_sample_csv(batch_name, sample_csv_name, sample_csv_content)
@@ -329,6 +340,62 @@ def validate_batch_name(raw_value: Any) -> str:
     if not VALID_BATCH_NAME.fullmatch(batch_name):
         raise ValueError("Batch name may only contain letters, numbers, dashes, and underscores.")
     return batch_name
+
+
+def _slugify_name(raw_value: str) -> str:
+    slug = re.sub(r"[^a-zA-Z0-9]+", "-", str(raw_value or "").strip().lower()).strip("-")
+    return slug[:60].strip("-")
+
+
+def _subject_from_sample_csv(content: str) -> str:
+    """Slug from the sample CSV's subject (Domain preferred, then Subject) first data row."""
+    if not content or not content.strip():
+        return ""
+    import csv as _csv
+    import io
+
+    reader = _csv.DictReader(io.StringIO(content))
+    for row in reader:
+        for key in ("Domain", "Subject", "domain", "subject"):
+            value = (row.get(key) or "").strip()
+            if value:
+                return _slugify_name(value)
+        break
+    return ""
+
+
+def _unique_batch_name(base: str) -> str:
+    """Auto-suffix so re-running a subject never overwrites a prior run."""
+    base = base or "extraction"
+    candidate = base
+    counter = 2
+    while get_batch_root(candidate).exists():
+        candidate = f"{base}-{counter}"
+        counter += 1
+    return candidate
+
+
+def _resolve_batch_name(
+    provided: Any,
+    *,
+    sample_csv_content: str = "",
+    source_urls: list[str] | None = None,
+    document_files: list[str] | None = None,
+) -> str:
+    """Use a valid provided name (draft->run continuity); otherwise derive from the
+    sample subject, then a source URL, then an uploaded filename, and make it unique."""
+    provided_name = str(provided or "").strip()
+    if provided_name and VALID_BATCH_NAME.fullmatch(provided_name):
+        return provided_name
+
+    subject = _subject_from_sample_csv(sample_csv_content)
+    if not subject and source_urls:
+        parsed = urlparse(source_urls[0])
+        segments = [seg for seg in parsed.path.split("/") if seg]
+        subject = _slugify_name(segments[-1] if segments else parsed.netloc)
+    if not subject and document_files:
+        subject = _slugify_name(Path(str(document_files[0])).stem)
+    return _unique_batch_name(subject or "extraction")
 
 
 def _parse_source_urls(raw_value: Any) -> list[str]:

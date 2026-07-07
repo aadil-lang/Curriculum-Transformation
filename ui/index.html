@@ -17,14 +17,11 @@
         <div class="layout-top">
           <section class="panel panel-form">
             <div class="section-head">
-              <h2>Batch Setup</h2>
+              <h2>New Extraction</h2>
               <span id="batchBadge" class="badge">Idle</span>
             </div>
 
-            <label class="field">
-              <span>Batch name</span>
-              <input id="batchName" type="text" placeholder="invoice_batch">
-            </label>
+            <p id="batchNameDisplay" class="inline-note" hidden></p>
 
             <label class="field">
               <span>Instructions</span>
@@ -94,31 +91,23 @@
                 <div id="samplePreviewTableWrap" class="sheet-grid empty-state">No sample preview yet.</div>
               </div>
             </div>
-            <div class="button-row preview-action-row">
+            <div id="sampleActions" class="button-row preview-action-row">
               <button id="downloadSampleButton" class="ghost" disabled>Download Sample CSV</button>
-              <button id="downloadFinalButton" class="ghost" disabled>Download Extracted CSV</button>
+              <button id="syncSampleButton" class="ghost" disabled>Sync Sample to Sheets</button>
               <button id="approveRunButton" class="accent" disabled>Approve Draft and Run Extraction</button>
             </div>
+            <div id="resultActions" class="button-row preview-action-row" hidden>
+              <button id="downloadFinalButton" class="accent" disabled>Download Extracted CSV</button>
+              <button id="auditBatchButton" class="secondary" disabled>Audit Extracted CSV</button>
+              <button id="syncFinalButton" class="secondary" disabled>Sync Final to Sheets</button>
+            </div>
+            <div id="resultSummary" class="result-summary">No results yet. Run an extraction to see output here.</div>
+            <div id="actionBox" class="action-status"></div>
             <pre id="statusBox" class="status-inline">Waiting for a batch.</pre>
           </section>
         </div>
 
         <div class="layout-bottom">
-          <section class="panel panel-output">
-            <div class="section-head">
-              <h2>Results</h2>
-            </div>
-
-            <div id="resultSummary" class="result-summary">No results yet. Run an extraction to see output here.</div>
-
-            <div class="action-row">
-              <button id="auditBatchButton" class="secondary" disabled>Audit</button>
-              <button id="syncFinalButton" class="secondary" disabled>Sync Final</button>
-              <button id="syncSampleButton" class="ghost" disabled>Sync Sample</button>
-            </div>
-            <div id="actionBox" class="action-status"></div>
-          </section>
-
           <aside class="panel panel-sidebar">
             <div class="section-head">
               <h2>Recent Batches</h2>
