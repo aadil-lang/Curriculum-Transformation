@@ -296,7 +296,7 @@ function renderPreview() {
     els.resultActions.hidden = false;
     els.resultSummary.hidden = false;
   } else {
-    els.previewHeading.textContent = "Sample Preview";
+    els.previewHeading.textContent = "Preview";
     els.previewMode.textContent = "Editable draft";
     els.previewPill.textContent = "CSV import";
     renderSamplePreview(els.sampleCsvEditor.value);
@@ -736,8 +736,7 @@ function resolveSamplePreviewTitle() {
       return existingFilename;
     }
   }
-
-  return resolveSampleDownloadFilename();
+  return "";
 }
 
 function updateSamplePreviewSelection(cellRef, cellValue) {
