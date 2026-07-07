@@ -1253,11 +1253,11 @@ def _infer_field_placement_rules(
             "If the approved sample supports merged topic cells and one standard genuinely spans multiple topics, merge those topic names into one Topic cell using ' | '."
         )
     if "l3" in present:
-        rules["l3"] = "Use L3 only for a genuine third hierarchy level from the source. Do not copy description text into L3."
+        rules["l3"] = "Use l3 only for a genuine third hierarchy level from the source. Do not copy description text into l3."
     if "l4" in present:
-        rules["l4"] = "Use L4 only for a genuine fourth hierarchy level from the source. Otherwise leave it blank."
+        rules["l4"] = "Use l4 only for a genuine fourth hierarchy level from the source. Otherwise leave it blank."
     if "l5" in present:
-        rules["l5"] = "Use L5 only for a genuine fifth hierarchy level from the source. Otherwise leave it blank."
+        rules["l5"] = "Use l5 only for a genuine fifth hierarchy level from the source. Otherwise leave it blank."
     if "description" in present:
         rules["description"] = (
             "Use description for the actual learning outcome, standard statement, or descriptive sentence. "
