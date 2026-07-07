@@ -417,27 +417,24 @@ def _call_anthropic_json(response_model: type[BaseModel], messages: list[dict[st
 
 
 def _call_portkey_json(response_model: type[BaseModel], messages: list[dict[str, str]], settings: Settings) -> BaseModel:
-    try:
-        from portkey_ai import Portkey
-    except ImportError as exc:  # pragma: no cover
-        raise RuntimeError("Portkey support requires the 'portkey-ai' package.") from exc
+    from portkey_client import call_portkey_structured
 
     provider = settings.portkey_extractor_provider or settings.portkey_critic_provider or "@openai"
-    client = Portkey(api_key=settings.portkey_api_key, provider=provider)
     try:
-        response = client.chat.completions.create(
+        # Route through Instructor (schema-enforced) like every other stage, so the
+        # audit verdict is coerced to response_model and re-prompted on mismatch
+        # instead of silently failing to parse (which caused every row to fall back
+        # to a "missing_row_audit" finding).
+        return call_portkey_structured(
+            api_key=settings.portkey_api_key,
+            provider=provider,
             model=settings.extractor_model,
+            response_model=response_model,
             messages=messages,
-            temperature=0,
-            response_format={"type": "json_object"},
+            max_tokens=32000,
+            max_concurrency=settings.llm_max_concurrency,
+            fallbacks=settings.extractor_fallbacks,
         )
-        content = _extract_message_text(response)
-        payload_data = json.loads(content)
-        if response_model is CsvBatchAuditVerdict:
-            payload = _normalize_batch_audit_payload(payload_data)
-        else:
-            payload = _normalize_audit_payload(payload_data)
-        return response_model.model_validate(payload)
     except Exception as exc:
         LOGGER.exception(
             "CSV audit Portkey call failed. provider=%s model=%s error_type=%s error=%r",
