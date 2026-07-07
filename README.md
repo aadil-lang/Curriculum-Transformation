@@ -61,6 +61,26 @@ python main.py verify
 
 For `.doc` support, also install LibreOffice (see System tools above).
 
+### Docker (VM / server deployment)
+
+The included `Dockerfile` bakes all three layers — Python deps, LibreOffice, and the
+Playwright/Chromium browser with its system libraries — so no manual VM setup is needed.
+
+```bash
+docker build -t curriculum-transform .
+
+# Secrets are NOT baked into the image; pass them at run time.
+docker run -p 8765:8765 \
+  -e PORTKEY_API_KEY=your_key \
+  -e GOOGLE_SHEETS_SPREADSHEET_ID=your_sheet_id \
+  -v "$(pwd)/output:/app/output" \
+  curriculum-transform
+```
+
+Then open http://localhost:8765. Mount `-v .../output:/app/output` to persist extracted
+CSVs outside the container. Provider/model names come from `config.py` defaults; override
+with `-e EXTRACTOR_MODEL=...` etc. if needed.
+
 ## Environment Variables
 
 Minimal `.env` values are documented in `.env.example`.

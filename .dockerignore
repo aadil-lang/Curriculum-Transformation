@@ -1,0 +1,14 @@
+.venv/
+.git/
+__pycache__/
+.pycache/
+*.pyc
+.runtime/
+output/
+input_documents/*
+!input_documents/.gitkeep
+.env
+*.zip
+*.pdf
+.DS_Store
+tmp/
