@@ -15,7 +15,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from agent_engine import ExtractionEngine
+from extractor import ExtractionEngine
 from config import (
     RuntimePaths,
     Settings,

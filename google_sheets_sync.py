@@ -212,7 +212,7 @@ def authorize_google_sheets_user(
         port=port,
         open_browser=open_browser,
         authorization_prompt_message="Open this URL in your browser to authorize Google Sheets access: {url}",
-        success_message="Google Sheets authorization complete. You can close this window and return to Codex.",
+        success_message="Google Sheets authorization complete. You can close this window and return to the app.",
     )
     token_path.write_text(credentials.to_json(), encoding="utf-8")
     return GoogleOAuthLoginResult(

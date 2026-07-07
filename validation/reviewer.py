@@ -7,7 +7,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field, create_model
 
-from agent_engine import PreExtractionUnderstanding, _extract_message_text
+from extractor import PreExtractionUnderstanding
 from config import Settings, get_settings
 from parsers.base import ParsedDocument
 from schemas import PIPELINE_METADATA_FIELDS, get_extraction_payload_model, load_schema_config, normalize_grade_level, schema_only_row_view

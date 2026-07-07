@@ -7,7 +7,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
-from agent_engine import _extract_message_text, _normalize_to_string_list
+from extractor import _normalize_to_string_list
 from config import Settings, get_settings
 from parsers.base import ParsedDocument
 from schemas import ALLOWED_GRADE_LEVELS, critic_row_view, get_output_column_name, load_schema_config

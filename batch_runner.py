@@ -13,11 +13,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from pydantic import BaseModel, Field, create_model
+from pydantic import BaseModel, Field
 
-from agent_engine import ExtractionRegion, _extract_message_text, _strip_json_code_fence
+from extractor import ExtractionRegion, _extract_message_text, _strip_json_code_fence
 from config import DEFAULT_SCHEMA_CONFIG_PATH, ROOT_DIR, RuntimePaths, Settings, get_runtime_paths
-from pipeline import DataTransformationPipeline, ProcessResult
+from pipeline import DataTransformationPipeline
 from schemas import (
     GRADE_LEVEL_NAMING_RULE,
     SampleTransformationContract,
@@ -28,7 +28,7 @@ from schemas import (
 )
 
 
-CHAT_BATCH_OUTPUT_DIR = ROOT_DIR / "output" / "chat_batches"
+CHAT_BATCH_OUTPUT_DIR = ROOT_DIR / "output" / "batch_runner"
 URL_PATTERN = re.compile(r"^https?://", re.IGNORECASE)
 DOWNLOADABLE_REMOTE_SUFFIXES = {".pdf", ".docx", ".doc", ".csv"}
 DIRECT_DOCUMENT_SUFFIXES = {".pdf", ".docx", ".doc"}
@@ -66,11 +66,11 @@ class ChatBatchExecutionResult:
     mode: str
 
 
-def run_chat_batches(request: ChatBatchRequest, settings: Settings) -> list[ChatBatchExecutionResult]:
-    return run_chat_batches_with_factory(request, settings)
+def run_batches(request: ChatBatchRequest, settings: Settings) -> list[ChatBatchExecutionResult]:
+    return run_batches_with_factory(request, settings)
 
 
-def run_chat_batches_with_factory(
+def run_batches_with_factory(
     request: ChatBatchRequest,
     settings: Settings,
     pipeline_factory: Callable[[Settings, RuntimePaths], DataTransformationPipeline] | None = None,
@@ -272,7 +272,7 @@ def infer_schema_from_documents(
     batch_name: str,
 ) -> TargetSchemaConfig:
     if settings.portkey_api_key or settings.gemini_api_key:
-        inferred = _infer_schema_with_gemini(input_files, settings, batch_name)
+        inferred = _infer_document_schema(input_files, settings, batch_name)
         if inferred is not None:
             return inferred
     return _heuristic_schema_from_documents(batch_name)
@@ -286,7 +286,7 @@ def create_schema_from_instructions(
     batch_name: str,
 ) -> TargetSchemaConfig:
     if settings.portkey_api_key or settings.gemini_api_key:
-        inferred = _infer_schema_from_instructions_with_gemini(
+        inferred = _infer_instruction_schema(
             instructions=instructions,
             input_files=input_files,
             settings=settings,
@@ -1486,7 +1486,7 @@ def _infer_target_schema_via_gemini(
         return None
 
 
-def _infer_schema_with_gemini(
+def _infer_document_schema(
     input_files: list[Path],
     settings: Settings,
     batch_name: str,
@@ -1509,7 +1509,7 @@ Document snippets:
     )
 
 
-def _infer_schema_from_instructions_with_gemini(
+def _infer_instruction_schema(
     *,
     instructions: str,
     input_files: list[Path],

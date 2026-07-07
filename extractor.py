@@ -13,11 +13,11 @@ from parsers.base import ParsedDocument
 from schemas import get_extraction_payload_model, load_schema_config
 
 
-class GeminiClientError(RuntimeError):
+class ExtractionClientError(RuntimeError):
     pass
 
 
-class ExtractionOutputTooLargeError(GeminiClientError):
+class ExtractionOutputTooLargeError(ExtractionClientError):
     """The model truncated its response because the output hit the token cap.
 
     Signals the chunking layer to split the input further and retry.
@@ -271,12 +271,12 @@ def _extract_message_text(response: Any) -> str:
         choices = getattr(response, "choices", []) or []
 
     if not choices:
-        raise GeminiClientError("Model response did not include any choices.")
+        raise ExtractionClientError("Model response did not include any choices.")
 
     first_choice = choices[0]
     message = first_choice.get("message") if isinstance(first_choice, dict) else getattr(first_choice, "message", None)
     if message is None:
-        raise GeminiClientError("Model response did not include a message payload.")
+        raise ExtractionClientError("Model response did not include a message payload.")
 
     content = message.get("content") if isinstance(message, dict) else getattr(message, "content", None)
     if isinstance(content, str):
@@ -300,7 +300,7 @@ def _extract_message_text(response: Any) -> str:
         if rendered:
             return rendered
 
-    raise GeminiClientError("Model response did not contain parsable text content.")
+    raise ExtractionClientError("Model response did not contain parsable text content.")
 
 
 @dataclass(slots=True)
@@ -673,7 +673,7 @@ Source markdown:
 
     def _call_portkey_json(self, response_model: type[BaseModel], messages: list[dict[str, str]]) -> BaseModel:
         if not self.settings.portkey_api_key:
-            raise GeminiClientError("PORTKEY_API_KEY is not configured.")
+            raise ExtractionClientError("PORTKEY_API_KEY is not configured.")
 
         from portkey_client import call_portkey_structured
 
@@ -700,13 +700,13 @@ Source markdown:
                 raise ExtractionOutputTooLargeError(
                     f"Portkey extractor output truncated ({type(exc).__name__}): {exc}"
                 ) from exc
-            raise GeminiClientError(
+            raise ExtractionClientError(
                 f"Portkey extractor failed ({type(exc).__name__}): {exc}"
             ) from exc
 
     def _call_gemini_instructor(self, response_model: type[BaseModel], messages: list[dict[str, str]]) -> BaseModel:
         if not self.settings.gemini_api_key:
-            raise GeminiClientError("GEMINI_API_KEY is not configured.")
+            raise ExtractionClientError("GEMINI_API_KEY is not configured.")
 
         import instructor
         from google import genai
@@ -728,7 +728,7 @@ Source markdown:
                 wrapper_errors.append(repr(exc))
 
         if client is None:
-            raise GeminiClientError(
+            raise ExtractionClientError(
                 "Unable to initialize Instructor Gemini client. "
                 + " | ".join(wrapper_errors)
             )
@@ -761,7 +761,7 @@ Source markdown:
             except Exception as exc:  # pragma: no cover - version-compatibility shim
                 call_errors.append(repr(exc))
 
-        raise GeminiClientError(
+        raise ExtractionClientError(
             "Instructor Gemini call failed across all known call styles. "
             + " | ".join(call_errors)
         )

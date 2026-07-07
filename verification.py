@@ -9,8 +9,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-from agent_engine import PreExtractionUnderstanding
-from chat_batches import build_chat_batch_request, run_chat_batches_with_factory
+from extractor import PreExtractionUnderstanding
+from batch_runner import build_chat_batch_request, run_batches_with_factory
 from docx import Document
 
 from config import RuntimePaths, get_runtime_paths, get_settings
@@ -240,7 +240,7 @@ def _run_chat_batch_verification(settings: Any) -> dict[str, Any]:
                 critic=StubCritic(),
             )
 
-        results = run_chat_batches_with_factory(request, settings, pipeline_factory=pipeline_factory)
+        results = run_batches_with_factory(request, settings, pipeline_factory=pipeline_factory)
         result = results[0]
 
         output_csv_path = Path(result.output_csv_path)
@@ -269,7 +269,7 @@ def _run_instruction_batch_verification(settings: Any) -> dict[str, Any]:
         output_csv_name=None,
     )
 
-    results = run_chat_batches_with_factory(request, settings)
+    results = run_batches_with_factory(request, settings)
     result = results[0]
 
     schema_payload = json.loads(Path(result.schema_path).read_text(encoding="utf-8"))

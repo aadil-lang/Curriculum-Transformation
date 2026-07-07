@@ -21,11 +21,7 @@ MONITOR_STATUS_PATH = OUTPUT_DIR / "monitor_status.json"
 DEFAULT_SCHEMA_CONFIG_PATH = ROOT_DIR / "schema_config.json"
 DOT_ENV_PATH = ROOT_DIR / ".env"
 DIRECT_PROVIDER_EXECUTION_MODE = "direct_provider"
-CODEX_CHAT_ASSISTED_EXECUTION_MODE = "codex_chat_assisted"
-SUPPORTED_EXECUTION_MODES = {
-    DIRECT_PROVIDER_EXECUTION_MODE,
-    CODEX_CHAT_ASSISTED_EXECUTION_MODE,
-}
+SUPPORTED_EXECUTION_MODES = {DIRECT_PROVIDER_EXECUTION_MODE}
 
 
 def load_dotenv(path: Path = DOT_ENV_PATH, override: bool = False) -> None:
@@ -76,7 +72,7 @@ class Settings:
     extractor_provider: str = field(default_factory=lambda: os.getenv("EXTRACTOR_PROVIDER", "gemini"))
     critic_provider: str = field(default_factory=lambda: os.getenv("CRITIC_PROVIDER", "openai").lower())
     critic_model: str = field(default_factory=lambda: os.getenv("CRITIC_MODEL", "gpt-5.5"))
-    execution_mode: Literal["direct_provider", "codex_chat_assisted"] = field(
+    execution_mode: Literal["direct_provider"] = field(
         default_factory=lambda: os.getenv("EXECUTION_MODE", DIRECT_PROVIDER_EXECUTION_MODE).strip().lower()
     )
     portkey_extractor_provider: str = field(
@@ -140,10 +136,6 @@ class Settings:
             raise ValueError(
                 f"Unsupported EXECUTION_MODE '{self.execution_mode}'. Supported values: {supported}."
             )
-
-    @property
-    def uses_codex_chat_assisted_execution(self) -> bool:
-        return self.execution_mode == CODEX_CHAT_ASSISTED_EXECUTION_MODE
 
 
 @dataclass(slots=True)

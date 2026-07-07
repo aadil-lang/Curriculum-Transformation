@@ -10,7 +10,6 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-from agent_engine import _extract_message_text
 from config import ROOT_DIR, RuntimePaths, Settings, get_runtime_paths
 from parsers.router import parse_input
 from schemas import load_schema_config
@@ -99,7 +98,7 @@ def audit_extracted_csv(
 
     active_settings = settings
     if sample_csv_path is not None:
-        from chat_batches import create_model_settings, create_schema_from_sample_csv
+        from batch_runner import create_model_settings, create_schema_from_sample_csv
 
         schema_config = create_schema_from_sample_csv(sample_csv_path.expanduser().resolve(), "csv_audit")
         schema_path = report_dir / f"{audit_csv_path.stem}.schema_config.json"
@@ -465,123 +464,6 @@ def _call_portkey_json(response_model: type[BaseModel], messages: list[dict[str,
         )
 
 
-def _normalize_audit_payload(payload: Any) -> dict[str, Any]:
-    if isinstance(payload, list) and payload:
-        payload = payload[0]
-
-    if not isinstance(payload, dict):
-        raise ValueError(f"Unexpected audit payload shape: {type(payload).__name__}")
-
-    normalized = dict(payload)
-    if "tag" not in normalized:
-        for alternate_key in ("row_status", "audit_result", "verdict", "result", "status"):
-            if alternate_key in normalized and normalized.get(alternate_key):
-                normalized["tag"] = str(normalized[alternate_key]).upper()
-                break
-    if "issues" in normalized and isinstance(normalized["issues"], list):
-        normalized["issues"] = [_normalize_issue_entry(issue) for issue in normalized["issues"]]
-    elif "issues" not in normalized:
-        raw_issues = (
-            normalized.get("issue_list")
-            or normalized.get("problems")
-            or normalized.get("findings")
-            or normalized.get("errors")
-            or []
-        )
-        if isinstance(raw_issues, list):
-            normalized["issues"] = [
-                _normalize_issue_entry(issue)
-                for issue in raw_issues
-            ]
-        else:
-            normalized["issues"] = []
-    if normalized.get("tag") not in {"VALID", "INVALID"}:
-        if normalized["issues"]:
-            normalized["tag"] = "INVALID"
-        else:
-            normalized["tag"] = "VALID"
-    normalized.setdefault("confidence_notes", normalized.get("summary", ""))
-    return normalized
-
-
-def _normalize_batch_audit_payload(payload: Any) -> dict[str, Any]:
-    if isinstance(payload, list) and payload:
-        payload = payload[0]
-
-    if not isinstance(payload, dict):
-        raise ValueError(f"Unexpected batch audit payload shape: {type(payload).__name__}")
-
-    normalized = dict(payload)
-    raw_findings = normalized.get("findings") or normalized.get("rows") or normalized.get("results") or []
-    if not isinstance(raw_findings, list):
-        raw_findings = []
-    normalized["findings"] = [_normalize_batch_finding_entry(finding) for finding in raw_findings]
-    normalized.setdefault("confidence_notes", normalized.get("summary", ""))
-    return normalized
-
-
-def _normalize_issue_entry(issue: Any) -> dict[str, str]:
-    if isinstance(issue, dict):
-        issue_message = (
-            issue.get("issue_message")
-            or issue.get("message")
-            or issue.get("reason")
-            or issue.get("finding")
-            or json.dumps(issue)
-        )
-        return {
-            "column_name": issue.get("column_name") or issue.get("column") or issue.get("field") or "",
-            "issue_type": issue.get("issue_type") or issue.get("type") or "audit_issue",
-            "issue_message": issue_message,
-            "suggested_fix": issue.get("suggested_fix") or issue.get("fix") or issue.get("suggestion") or "",
-        }
-    return {
-        "column_name": "",
-        "issue_type": "audit_issue",
-        "issue_message": str(issue),
-        "suggested_fix": "",
-    }
-
-
-def _normalize_batch_finding_entry(finding: Any) -> dict[str, Any]:
-    if not isinstance(finding, dict):
-        raise ValueError(f"Unexpected batch finding payload shape: {type(finding).__name__}")
-
-    normalized = dict(finding)
-    row_number = normalized.get("row_number") or normalized.get("row") or normalized.get("line")
-    if row_number is None:
-        raise ValueError(f"Batch audit finding is missing row_number: {finding}")
-
-    tag = normalized.get("tag")
-    if not tag:
-        for alternate_key in ("row_status", "audit_result", "verdict", "result", "status"):
-            if normalized.get(alternate_key):
-                tag = normalized[alternate_key]
-                break
-
-    raw_issues = (
-        normalized.get("issues")
-        or normalized.get("issue_list")
-        or normalized.get("problems")
-        or normalized.get("errors")
-        or []
-    )
-    if not isinstance(raw_issues, list):
-        raw_issues = [raw_issues]
-
-    issues = [_normalize_issue_entry(issue) for issue in raw_issues if issue not in (None, "")]
-    normalized_tag = str(tag).upper() if tag else ("INVALID" if issues else "VALID")
-    if normalized_tag not in {"VALID", "INVALID"}:
-        normalized_tag = "INVALID" if issues else "VALID"
-
-    return {
-        "row_number": int(row_number),
-        "tag": normalized_tag,
-        "issues": issues,
-        "confidence_notes": normalized.get("confidence_notes") or normalized.get("summary") or "",
-    }
-
-
 def _chunk_rows(
     grouped_rows: list[tuple[int, dict[str, str]]],
     size: int,
@@ -596,7 +478,7 @@ def _load_source_document(source_reference: str, runtime_paths: Any, cache: dict
             raise cached
         return cached
 
-    from chat_batches import _materialize_manifest_source
+    from batch_runner import _materialize_manifest_source
 
     materialized = _materialize_manifest_source(
         reference=source_reference,
