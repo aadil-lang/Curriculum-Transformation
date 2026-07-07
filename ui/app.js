@@ -41,7 +41,6 @@ const els = {
   sampleActions: document.getElementById("sampleActions"),
   resultActions: document.getElementById("resultActions"),
   previewHeading: document.getElementById("previewHeading"),
-  previewMode: document.getElementById("previewMode"),
   previewPill: document.getElementById("previewPill"),
   downloadFinalButton: document.getElementById("downloadFinalButton"),
   actionBox: document.getElementById("actionBox"),
@@ -54,7 +53,6 @@ const els = {
   auditBatchButton: document.getElementById("auditBatchButton"),
   syncFinalButton: document.getElementById("syncFinalButton"),
   syncSampleButton: document.getElementById("syncSampleButton"),
-  refreshButton: document.getElementById("refreshButton"),
   reloadBatchesButton: document.getElementById("reloadBatchesButton"),
 };
 
@@ -160,21 +158,6 @@ els.syncFinalButton.addEventListener("click", async () => {
 
 els.syncSampleButton.addEventListener("click", async () => {
   await runSync(els.syncSampleButton, true);
-});
-
-els.refreshButton.addEventListener("click", async () => {
-  const batchName = normalizedBatchName();
-  if (!batchName) {
-    setStatus("Enter or load a batch name to refresh it.");
-    return;
-  }
-  try {
-    await runButtonAction(els.refreshButton, async () => {
-      await loadBatch(batchName);
-    });
-  } catch (error) {
-    setStatus(error.message);
-  }
 });
 
 els.reloadBatchesButton.addEventListener("click", async () => {
@@ -288,7 +271,6 @@ function hydrateBatch(batch) {
 function renderPreview() {
   if (state.showFinal) {
     els.previewHeading.textContent = "Extracted CSV";
-    els.previewMode.textContent = "Read-only result";
     els.previewPill.textContent = "Result";
     els.samplePreviewTitle.textContent = state.cleanCsvName || "Extracted CSV";
     renderReadOnlyGrid(els.samplePreviewTableWrap, state.cleanCsv, els.samplePreviewMeta);
@@ -297,7 +279,6 @@ function renderPreview() {
     els.resultSummary.hidden = false;
   } else {
     els.previewHeading.textContent = "Preview";
-    els.previewMode.textContent = "Editable draft";
     els.previewPill.textContent = "CSV import";
     renderSamplePreview(els.sampleCsvEditor.value);
     els.sampleActions.hidden = false;
@@ -906,7 +887,6 @@ function initializeManagedButtons() {
     els.auditBatchButton,
     els.syncFinalButton,
     els.syncSampleButton,
-    els.refreshButton,
     els.reloadBatchesButton,
   ]) {
     if (!button) {
@@ -993,7 +973,6 @@ async function ensureMinimumLoadingTime(startedAt) {
 
 function updateButtonAvailability() {
   const hasSample = Boolean(els.sampleCsvEditor.value.trim());
-  const hasBatch = Boolean(normalizedBatchName());
 
   els.generateDraftButton.disabled = state.isBusy;
   els.runExtractionButton.disabled = state.isBusy;
@@ -1003,7 +982,6 @@ function updateButtonAvailability() {
   els.auditBatchButton.disabled = state.isBusy || !state.batchCapabilities.hasFinalCsv;
   els.syncFinalButton.disabled = state.isBusy || !state.batchCapabilities.hasFinalCsv;
   els.syncSampleButton.disabled = state.isBusy || !state.batchCapabilities.hasSampleArtifact;
-  els.refreshButton.disabled = state.isBusy || !hasBatch;
   els.reloadBatchesButton.disabled = state.isBusy;
 
   for (const openButton of els.batchList.querySelectorAll(".batch-item button")) {
