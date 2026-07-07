@@ -60,10 +60,12 @@ class DataTransformationPipeline:
         reviewer: Any | None = None,
         critic: Any | None = None,
         region_override: Any | None = None,
+        source_url_map: dict[str, str] | None = None,
     ) -> None:
         self.settings = settings or get_settings()
         self.runtime_paths = runtime_paths or get_runtime_paths()
         self.region_override = region_override
+        self.source_url_map = source_url_map or {}
         self._uses_default_extractor = extractor is None
         self._uses_default_reviewer = reviewer is None
         self._uses_default_critic = critic is None
@@ -192,6 +194,21 @@ class DataTransformationPipeline:
 
         raise RuntimeError("Unreachable retry loop state.")
 
+    def _canonical_source(self, parsed_document: Any) -> str:
+        """Best canonical source link for a document's rows.
+
+        Prefers the explicit input URL (source_url_map, keyed by staged path),
+        then the parser-captured URL (websites), then the source path.
+        """
+        source_path = str(getattr(parsed_document, "source_path", "") or "")
+        if source_path in self.source_url_map:
+            return self.source_url_map[source_path]
+        metadata = getattr(parsed_document, "metadata", {}) or {}
+        url = str(metadata.get("url") or "").strip()
+        if url:
+            return url
+        return source_path
+
     def _review_and_validate_rows(
         self,
         payload_rows: list[BaseModel],
@@ -199,6 +216,10 @@ class DataTransformationPipeline:
         planning: Any,
         row_model: type[BaseModel],
     ) -> tuple[list[BaseModel], list[Any]]:
+        canonical_source = self._canonical_source(parsed_document)
+        schema_fields = {spec.name for spec in get_schema_fields(str(self.settings.schema_config_path))}
+        has_source_field = "source" in schema_fields
+
         def handle(payload: BaseModel) -> tuple[BaseModel, Any]:
             row = row_model.model_validate(
                 {
@@ -213,6 +234,17 @@ class DataTransformationPipeline:
             verdict = self.critic.validate(row, parsed_document)
             if verdict.tag != "VALID":
                 raise RuntimeError("Critic did not return a VALID tag.")
+            # Stamp the canonical source link AFTER review/critic so neither stage
+            # can strip it (the model omits it since it isn't verbatim in the body),
+            # and it is deterministic pipeline provenance, not model-extracted content.
+            if has_source_field and canonical_source:
+                updates: dict[str, Any] = {}
+                if not str(getattr(row, "source", "") or "").strip():
+                    updates["source"] = canonical_source
+                    if not str(getattr(row, "source_source_citation", "") or "").strip():
+                        updates["source_source_citation"] = canonical_source
+                if updates:
+                    row = row.model_copy(update=updates)
             return row, review_metadata
 
         max_workers = max(1, min(self.settings.row_max_workers, len(payload_rows)))

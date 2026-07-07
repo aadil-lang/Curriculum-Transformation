@@ -135,7 +135,9 @@ def _run_single_batch(
     runtime_paths.final_csv_path = runtime_paths.output_dir / _default_batch_csv_name(batch)
     schema_path = runtime_paths.output_dir / "schema_config.json"
 
-    resolved_input_files = _materialize_input_references(batch.input_files, runtime_paths)
+    resolved_input_files, source_url_map = _materialize_input_references_with_urls(
+        batch.input_files, runtime_paths
+    )
     resolved_sample_csv = _materialize_optional_sample_csv(batch.sample_csv, runtime_paths)
     sample_manifest_inputs = (
         _expand_manifest_csv_inputs(
@@ -206,7 +208,10 @@ def _run_single_batch(
         pipeline_factory(batch_settings, runtime_paths)
         if pipeline_factory
         else DataTransformationPipeline(
-            settings=batch_settings, runtime_paths=runtime_paths, region_override=region_override
+            settings=batch_settings,
+            runtime_paths=runtime_paths,
+            region_override=region_override,
+            source_url_map=source_url_map,
         )
     )
     process_results = pipeline.process_paths(resolved_input_files)
@@ -343,7 +348,20 @@ def _materialize_optional_sample_csv(sample_csv: str | None, runtime_paths: Runt
 
 
 def _materialize_input_references(references: list[str], runtime_paths: RuntimePaths) -> list[Path]:
+    materialized, _ = _materialize_input_references_with_urls(references, runtime_paths)
+    return materialized
+
+
+def _materialize_input_references_with_urls(
+    references: list[str], runtime_paths: RuntimePaths
+) -> tuple[list[Path], dict[str, str]]:
+    """Materialize inputs and return (paths, {staged_path: origin_url}).
+
+    The origin URL is the canonical source link used to populate the `source`
+    column and to re-fetch each row's document during the audit.
+    """
     materialized: list[Path] = []
+    url_map: dict[str, str] = {}
     for index, reference in enumerate(references):
         path = _materialize_reference(
             reference=reference,
@@ -362,9 +380,11 @@ def _materialize_input_references(references: list[str], runtime_paths: RuntimeP
                 )
             materialized.extend(manifest_inputs)
             continue
+        if _looks_like_url(reference):
+            url_map[str(path)] = reference.strip()
         materialized.append(path)
 
-    return _merge_unique_paths(materialized, [])
+    return _merge_unique_paths(materialized, []), url_map
 
 
 def _materialize_reference(reference: str, destination_dir: Path, default_stub: str) -> Path:
