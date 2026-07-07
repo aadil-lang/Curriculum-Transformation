@@ -17,7 +17,39 @@ class GeminiClientError(RuntimeError):
     pass
 
 
+class ExtractionOutputTooLargeError(GeminiClientError):
+    """The model truncated its response because the output hit the token cap.
+
+    Signals the chunking layer to split the input further and retry.
+    """
+
+
 LOGGER = logging.getLogger(__name__)
+
+
+class ExtractionRegion(BaseModel):
+    start_anchor: str = Field(
+        default="",
+        description="Verbatim text marking where extractable content STARTS (a '# Page N' marker for PDFs, or a heading line for docs). Empty if the whole document should be used.",
+    )
+    end_anchor: str = Field(
+        default="",
+        description="Verbatim text marking where extractable content ENDS. Empty means continue to the end of the document.",
+    )
+    skip_anchors: list[str] = Field(
+        default_factory=list,
+        description="Verbatim heading/marker texts between start and end whose sections must be skipped (e.g. an embedded contents table).",
+    )
+    confidence: str = Field(
+        default="low",
+        description="Confidence in these boundaries: one of high, medium, low.",
+    )
+    notes: str = Field(default="", description="Short explanation of the chosen boundaries.")
+
+    @field_validator("skip_anchors", mode="before")
+    @classmethod
+    def _normalize_skip_anchors(cls, value: Any) -> list[str]:
+        return _normalize_to_string_list(value)
 
 
 class PreExtractionUnderstanding(BaseModel):
@@ -132,6 +164,93 @@ def _stringify_structured_value(value: Any) -> str:
     return str(value).strip()
 
 
+def _document_outline(markdown: str, max_chars: int = 12000) -> str:
+    """The heading lines and page markers of a document, for the locate pass.
+
+    Feeding only the structure (not the full text) keeps the locate call cheap and
+    avoids its own overflow on large documents.
+    """
+    lines = [
+        line.rstrip()
+        for line in markdown.splitlines()
+        if line.lstrip().startswith("#")
+    ]
+    outline = "\n".join(lines)
+    if len(outline) <= max_chars:
+        return outline
+    return outline[:max_chars]
+
+
+def _apply_region(markdown: str, region: "ExtractionRegion") -> str | None:
+    """Slice markdown to the region's [start_anchor, end_anchor] with skip sections removed.
+
+    Returns None to signal "use the full document" whenever the boundary is missing,
+    low-confidence, or the result is implausibly small — coverage is never sacrificed to
+    a bad boundary.
+    """
+    if region.confidence.strip().lower() == "low":
+        return None
+    start = region.start_anchor.strip()
+    if not start:
+        return None
+    start_idx = markdown.find(start)
+    if start_idx == -1:
+        return None
+
+    end = region.end_anchor.strip()
+    if end:
+        end_idx = markdown.find(end, start_idx + len(start))
+        bounded = markdown[start_idx:end_idx] if end_idx != -1 else markdown[start_idx:]
+    else:
+        bounded = markdown[start_idx:]
+
+    # Remove each skip section: from the skip anchor to the next line that starts with
+    # '#' (next heading/page) or end of the bounded text.
+    for skip in region.skip_anchors:
+        skip = skip.strip()
+        if not skip:
+            continue
+        s_idx = bounded.find(skip)
+        if s_idx == -1:
+            continue
+        newline = bounded.find("\n", s_idx)
+        next_heading = -1
+        search_from = newline if newline != -1 else s_idx + len(skip)
+        for candidate_line_start in _iter_line_starts(bounded, search_from):
+            if bounded[candidate_line_start:].lstrip().startswith("#"):
+                next_heading = candidate_line_start
+                break
+        cut_end = next_heading if next_heading != -1 else len(bounded)
+        bounded = bounded[:s_idx] + bounded[cut_end:]
+
+    # Guard against detection errors that bound to a trivial fragment. A high-confidence
+    # region is trusted even when small (outcomes are often a small slice of a large doc,
+    # which is exactly the case region targeting exists for); otherwise require a modest floor.
+    bounded_len = len(bounded.strip())
+    if bounded_len < 1000:
+        return None
+    if region.confidence.strip().lower() != "high" and bounded_len < int(len(markdown) * 0.05):
+        return None
+    return bounded
+
+
+def _iter_line_starts(text: str, from_index: int):
+    idx = from_index
+    length = len(text)
+    while idx < length:
+        yield idx
+        nl = text.find("\n", idx)
+        if nl == -1:
+            return
+        idx = nl + 1
+
+
+def _is_output_truncation_error(exc: Exception) -> bool:
+    markers = ("incompleteoutput", "max_tokens", "length limit", "finish_reason", "output is incomplete")
+    text = f"{type(exc).__name__} {exc}".lower()
+    return any(marker in text for marker in markers)
+
+
 def _strip_json_code_fence(content: str) -> str:
     text = content.strip()
     fenced = re.search(r"```(?:json)?\s*(.*?)\s*```", text, re.DOTALL)
@@ -196,9 +315,17 @@ class ExtractionEngine:
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or get_settings()
 
-    def extract(self, parsed_document: ParsedDocument, prior_error_log: str | None = None) -> ExtractionAttempt:
+    def extract(
+        self,
+        parsed_document: ParsedDocument,
+        prior_error_log: str | None = None,
+        region_override: ExtractionRegion | None = None,
+    ) -> ExtractionAttempt:
         schema_path = str(self.settings.schema_config_path)
         payload_model = get_extraction_payload_model(schema_path)
+
+        parsed_document = self._apply_region_targeting(parsed_document, region_override)
+
         planning = self._analyze_document(parsed_document, prior_error_log)
         envelope_model = create_model(
             "ExtractionEnvelope",
@@ -214,14 +341,170 @@ class ExtractionEngine:
             ),
         )
 
-        messages = self._build_extraction_messages(parsed_document, planning, prior_error_log)
-        response = self._call_extractor(envelope_model, messages)
+        chunks = self._chunk_markdown(parsed_document.markdown)
+        payload_rows: list[BaseModel] = []
+        anchoring_plan: dict[str, str] = {}
+        for chunk in chunks:
+            rows, plan = self._extract_chunk_rows(
+                parsed_document, planning, prior_error_log, envelope_model, chunk
+            )
+            payload_rows.extend(rows)
+            anchoring_plan.update(plan)
+
         return ExtractionAttempt(
             planning=planning,
-            payload_rows=response.payload_rows,
+            payload_rows=payload_rows,
             layout_analysis=planning.layout_analysis,
-            anchoring_plan=response.anchoring_plan,
+            anchoring_plan=anchoring_plan,
         )
+
+    def _apply_region_targeting(
+        self,
+        parsed_document: ParsedDocument,
+        region_override: ExtractionRegion | None,
+    ) -> ParsedDocument:
+        if region_override is None and not self.settings.enable_region_targeting:
+            return parsed_document
+
+        region = region_override if region_override is not None else self._locate_extraction_region(parsed_document)
+        if region is None:
+            return parsed_document
+
+        bounded = _apply_region(parsed_document.markdown, region)
+        original_len = len(parsed_document.markdown)
+        if bounded is None or not bounded.strip():
+            LOGGER.info(
+                "Region targeting: no reliable boundary for %s; using full document (%d chars).",
+                parsed_document.source_name,
+                original_len,
+            )
+            return parsed_document
+
+        LOGGER.info(
+            "Region targeting for %s: bounded %d -> %d chars (start=%r end=%r skip=%d, confidence=%s).",
+            parsed_document.source_name,
+            original_len,
+            len(bounded),
+            region.start_anchor[:60],
+            region.end_anchor[:60],
+            len(region.skip_anchors),
+            region.confidence,
+        )
+        return parsed_document.model_copy(update={"markdown": bounded})
+
+    def _locate_extraction_region(self, parsed_document: ParsedDocument) -> ExtractionRegion | None:
+        outline = _document_outline(parsed_document.markdown)
+        if not outline.strip():
+            return None
+        schema_config = load_schema_config(settings=self.settings)
+        sample_contract_json = (
+            json.dumps(schema_config.sample_contract.model_dump(mode="json"), indent=2)
+            if schema_config.sample_contract
+            else "null"
+        )
+        system_prompt = (
+            "You locate the region of a curriculum document that contains the extractable rows "
+            "(typically the syllabus outcomes/standards), so downstream extraction can skip "
+            "front matter, rationale, assessment guidance, glossary, appendices, and sample work. "
+            "Return anchors as VERBATIM text copied from the provided outline. For paginated "
+            "sources use the '# Page N' markers; otherwise use heading lines. "
+            "Return your response as a single JSON object."
+        )
+        user_prompt = f"""
+The approved sample CSV contract describes what one extractable row looks like:
+{sample_contract_json}
+
+Below is the structural outline (headings and page markers) of the document '{parsed_document.source_name}'.
+Identify:
+- start_anchor: the verbatim outline line where extractable content begins.
+- end_anchor: the verbatim outline line where extractable content ends (empty to run to the end).
+- skip_anchors: verbatim outline lines between start and end whose sections must be skipped.
+- confidence: high, medium, or low.
+
+If you cannot confidently locate an outcomes region, return empty anchors with confidence=low.
+
+Document outline:
+{outline}
+""".strip()
+        try:
+            return self._call_extractor(
+                ExtractionRegion,
+                [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+            )
+        except Exception as exc:  # noqa: BLE001 - locate is best-effort; fall back to full doc
+            LOGGER.info("Region locate pass failed for %s (%s); using full document.", parsed_document.source_name, exc)
+            return None
+
+    def _extract_chunk_rows(
+        self,
+        parsed_document: ParsedDocument,
+        planning: PreExtractionUnderstanding,
+        prior_error_log: str | None,
+        envelope_model: type[BaseModel],
+        chunk: str,
+    ) -> tuple[list[BaseModel], dict[str, str]]:
+        chunk_note = (
+            "This is one part of a larger source document. "
+            "Extract only rows supported by THIS part; other parts are handled separately."
+        )
+        messages = self._build_extraction_messages(
+            parsed_document, planning, prior_error_log, markdown_override=chunk, chunk_note=chunk_note
+        )
+        try:
+            response = self._call_extractor(envelope_model, messages)
+            return list(response.payload_rows), dict(response.anchoring_plan)
+        except ExtractionOutputTooLargeError:
+            # The chunk yielded more output than the model's token cap allows.
+            # Split it in half on a line boundary and extract each part, down to a floor.
+            halves = self._split_in_half(chunk)
+            if halves is None:
+                raise
+            LOGGER.info("Chunk output too large; splitting %d chars into 2 sub-chunks.", len(chunk))
+            payload_rows: list[BaseModel] = []
+            anchoring_plan: dict[str, str] = {}
+            for half in halves:
+                rows, plan = self._extract_chunk_rows(
+                    parsed_document, planning, prior_error_log, envelope_model, half
+                )
+                payload_rows.extend(rows)
+                anchoring_plan.update(plan)
+            return payload_rows, anchoring_plan
+
+    def _split_in_half(self, chunk: str) -> list[str] | None:
+        lines = chunk.splitlines(keepends=True)
+        # Stop shrinking at a floor or when a chunk is a single unsplittable line.
+        if len(lines) < 2 or len(chunk) <= 4000:
+            return None
+        mid = len(lines) // 2
+        first = "".join(lines[:mid])
+        second = "".join(lines[mid:])
+        if not first.strip() or not second.strip():
+            return None
+        return [first, second]
+
+    def _chunk_markdown(self, markdown: str) -> list[str]:
+        limit = self.settings.extraction_max_chars_per_chunk
+        if len(markdown) <= limit:
+            return [markdown]
+
+        # Split on line boundaries so table rows (one per line in rendered docx/pdf
+        # markdown) are never cut mid-row. Pack lines greedily up to the limit.
+        chunks: list[str] = []
+        current: list[str] = []
+        current_len = 0
+        for line in markdown.splitlines(keepends=True):
+            if current and current_len + len(line) > limit:
+                chunks.append("".join(current))
+                current = []
+                current_len = 0
+            current.append(line)
+            current_len += len(line)
+        if current:
+            chunks.append("".join(current))
+        return chunks
 
     def _analyze_document(
         self,
@@ -255,7 +538,8 @@ class ExtractionEngine:
             "Before extraction, inspect the unique source structure together with the sample CSV contract. "
             "This step is only for understanding how rows are formed and how each column is derived. "
             "Do not hardcode subject-specific assumptions. "
-            "Infer the meaning of each output column for this subject from the approved sample contract first, then from the source structure."
+            "Infer the meaning of each output column for this subject from the approved sample contract first, then from the source structure. "
+            "grade_level must be exactly one of: Elementary School, Middle School, High School."
         )
 
         user_prompt = f"""
@@ -278,7 +562,7 @@ Instructions:
 2. First infer what each output column means for this subject under the approved sample contract. Do not assume the same subject/domain/topic/grade pattern used by a different subject.
 3. Explain in row_formation_logic how one complete output row is formed from this source and how that row pattern repeats across the source.
 4. For each schema field, explain in column_derivations what data it should contain and how it is derived from the source.
-5. Determine whether values such as source, subject, domain, topic, grade_level, display_grade, and grade_number are document-level, section-level, or row-level for this specific subject and source.
+5. Determine whether values such as source, subject, domain, topic, grade_level, display_grade, and grade_number are document-level, section-level, or row-level for this specific subject and source. grade_level must always normalize to exactly one of Elementary School, Middle School, or High School.
 6. If the approved sample implies canonical public source links, merged topic paths, row-specific stage labels, or transformed display codes, note that explicitly when supported by the source.
 7. Build representative_row as a row-shaped preview showing what one complete row would contain under this sample contract.
 8. List exclusion_rules describing what source content must be rejected from output rows.
@@ -299,6 +583,8 @@ Source markdown:
         parsed_document: ParsedDocument,
         planning: PreExtractionUnderstanding,
         prior_error_log: str | None,
+        markdown_override: str | None = None,
+        chunk_note: str | None = None,
     ) -> list[dict[str, str]]:
         schema_config = load_schema_config(settings=self.settings)
         schema_json = json.dumps(schema_config.model_dump(mode="json"), indent=2)
@@ -308,6 +594,7 @@ Source markdown:
             else "null"
         )
         planning_json = json.dumps(planning.model_dump(mode="json"), indent=2)
+        source_markdown = markdown_override if markdown_override is not None else parsed_document.markdown
         correction_block = (
             "No prior validation failures.\n"
             if not prior_error_log
@@ -320,6 +607,7 @@ Source markdown:
             "Use the pre-extraction understanding artifact as the required plan before mapping content into the provided schema. "
             "The provided sample CSV contract defines the transformation rules and output style; follow it strictly. "
             "Infer subject-specific column meaning from the sample contract and source rather than hardcoding one hierarchy interpretation across subjects. "
+            "grade_level must be exactly one of: Elementary School, Middle School, High School."
             "Description fields must preserve source meaning completely, without truncation, cross-row merges, "
             "neighbor contamination, or forced flattening when multiline structure is meaningful. "
             "Preserve mathematical symbols, equations, radicals, superscripts, subscripts, chemistry notation, "
@@ -335,7 +623,8 @@ Source markdown:
             "If the approved sample supports prefixed or formed display codes and the same raw display code repeats, prefix it with a short domain code or topic code plus a dot when that disambiguation is supported by the source structure. "
             "Do not stop after the first row. "
             "Do not omit valid domains, topics, or descriptions that belong in output. "
-            "Return payload_rows in source order with no duplicates and no missing supported rows."
+            "Return payload_rows in source order with no duplicates and no missing supported rows. "
+            "grade_level must be exactly one of: Elementary School, Middle School, High School."
         )
 
         user_prompt = f"""
@@ -353,13 +642,13 @@ Document metadata:
 - source_type: {parsed_document.source_type}
 - source_path: {parsed_document.source_path}
 
-Validation feedback:
+{("Chunking note:\n" + chunk_note + chr(10)) if chunk_note else ""}Validation feedback:
 {correction_block}
 
 Instructions:
 1. Use the pre-extraction understanding artifact before extracting any values.
 2. Build a temporary field anchoring plan explaining where each schema field appears in this specific layout.
-3. Apply the sample-derived meaning of each column consistently across all rows. Once you infer what source, subject, domain, topic, grade_level, display_grade, and grade_number mean for this subject, do not drift to a different interpretation.
+3. Apply the sample-derived meaning of each column consistently across all rows. Once you infer what source, subject, domain, topic, grade_level, display_grade, and grade_number mean for this subject, do not drift to a different interpretation. grade_level must be exactly Elementary School, Middle School, or High School.
 4. Extract every valid output row from the source, not just one row.
 5. Ensure complete source coverage for all valid domains, topics, and descriptions that match the sample contract.
 6. Return payload_rows in source reading order with one object per output row.
@@ -369,7 +658,7 @@ Instructions:
 10. If the source contradicts the draft representative_row, follow the source while preserving the sample contract.
 
 Source markdown:
-{parsed_document.markdown}
+{source_markdown}
 """.strip()
 
         return [
@@ -386,23 +675,17 @@ Source markdown:
         if not self.settings.portkey_api_key:
             raise GeminiClientError("PORTKEY_API_KEY is not configured.")
 
-        try:
-            from portkey_ai import Portkey
-        except ImportError as exc:  # pragma: no cover - optional integration
-            raise GeminiClientError(
-                "Portkey support requires the 'portkey-ai' package. Install it to use PORTKEY_API_KEY mode."
-            ) from exc
+        from portkey_client import call_portkey_structured
 
-        client = Portkey(
-            api_key=self.settings.portkey_api_key,
-            provider=self.settings.portkey_extractor_provider,
-        )
         try:
-            response = client.chat.completions.create(
+            return call_portkey_structured(
+                api_key=self.settings.portkey_api_key,
+                provider=self.settings.portkey_extractor_provider,
                 model=self.settings.extractor_model,
+                response_model=response_model,
                 messages=messages,
-                temperature=0,
-                response_format={"type": "json_object"},
+                max_tokens=32000,
+                max_concurrency=self.settings.llm_max_concurrency,
             )
         except Exception as exc:
             LOGGER.exception(
@@ -412,15 +695,13 @@ Source markdown:
                 type(exc).__name__,
                 exc,
             )
+            if _is_output_truncation_error(exc):
+                raise ExtractionOutputTooLargeError(
+                    f"Portkey extractor output truncated ({type(exc).__name__}): {exc}"
+                ) from exc
             raise GeminiClientError(
                 f"Portkey extractor failed ({type(exc).__name__}): {exc}"
             ) from exc
-        content = _extract_message_text(response)
-        try:
-            payload = json.loads(_strip_json_code_fence(content))
-        except json.JSONDecodeError as exc:
-            raise GeminiClientError(f"Portkey extractor returned invalid JSON: {exc}") from exc
-        return response_model.model_validate(payload)
 
     def _call_gemini_instructor(self, response_model: type[BaseModel], messages: list[dict[str, str]]) -> BaseModel:
         if not self.settings.gemini_api_key:

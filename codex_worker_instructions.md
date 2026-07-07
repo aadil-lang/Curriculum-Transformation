@@ -26,7 +26,8 @@ Important implications:
 - `subject` may be a parent learning area for one subject and a course title for another
 - `domain` may be a syllabus title, strand family, framework section, or course grouping
 - `topic` may be a single heading or a merged path joined with ` | `
-- `grade_level`, `display_grade`, and `grade_number` may be document-level or row-level depending on the approved sample and source
+- `grade_level` must be exactly `Elementary School`, `Middle School`, or `High School`
+- `display_grade` and `grade_number` may be document-level or row-level depending on the approved sample and source
 - `source` may need to be a canonical public URL rather than a local file name when the approved sample expects that pattern
 
 ## Queue Commands

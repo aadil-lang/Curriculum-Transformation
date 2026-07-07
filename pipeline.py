@@ -59,9 +59,11 @@ class DataTransformationPipeline:
         extractor: Any | None = None,
         reviewer: Any | None = None,
         critic: Any | None = None,
+        region_override: Any | None = None,
     ) -> None:
         self.settings = settings or get_settings()
         self.runtime_paths = runtime_paths or get_runtime_paths()
+        self.region_override = region_override
         self._uses_default_extractor = extractor is None
         self._uses_default_reviewer = reviewer is None
         self._uses_default_critic = critic is None
@@ -142,29 +144,16 @@ class DataTransformationPipeline:
         for attempt_number in range(self.settings.max_retries + 1):
             prior_error_log = "\n\n".join(error_log_history) if error_log_history else None
             try:
-                extraction = self.extractor.extract(parsed_document, prior_error_log=prior_error_log)
+                extraction = self.extractor.extract(
+                    parsed_document, prior_error_log=prior_error_log, region_override=self.region_override
+                )
                 self._write_analysis_artifact(path, parsed_document, extraction)
                 if not extraction.payload_rows:
                     raise RuntimeError("Extractor returned no rows for this source.")
 
-                validated_rows: list[BaseModel] = []
-                review_metadata_by_row = []
-                for payload in extraction.payload_rows:
-                    row = row_model.model_validate(
-                        {
-                            "source_document": parsed_document.source_name,
-                            "source_type": parsed_document.source_type,
-                            "source_identifier": parsed_document.document_id,
-                            "processed_at_utc": datetime.now(timezone.utc).isoformat(),
-                            **payload.model_dump(),
-                        }
-                    )
-                    row, review_metadata = self.reviewer.review_and_fix(row, parsed_document, extraction.planning)
-                    verdict = self.critic.validate(row, parsed_document)
-                    if verdict.tag != "VALID":
-                        raise RuntimeError("Critic did not return a VALID tag.")
-                    validated_rows.append(row)
-                    review_metadata_by_row.append(review_metadata)
+                validated_rows, review_metadata_by_row = self._review_and_validate_rows(
+                    extraction.payload_rows, parsed_document, extraction.planning, row_model
+                )
 
                 self._write_review_artifact(path, parsed_document, validated_rows, review_metadata_by_row)
                 self._append_rows_to_csv(validated_rows)
@@ -202,6 +191,57 @@ class DataTransformationPipeline:
                     )
 
         raise RuntimeError("Unreachable retry loop state.")
+
+    def _review_and_validate_rows(
+        self,
+        payload_rows: list[BaseModel],
+        parsed_document: Any,
+        planning: Any,
+        row_model: type[BaseModel],
+    ) -> tuple[list[BaseModel], list[Any]]:
+        def handle(payload: BaseModel) -> tuple[BaseModel, Any]:
+            row = row_model.model_validate(
+                {
+                    "source_document": parsed_document.source_name,
+                    "source_type": parsed_document.source_type,
+                    "source_identifier": parsed_document.document_id,
+                    "processed_at_utc": datetime.now(timezone.utc).isoformat(),
+                    **payload.model_dump(),
+                }
+            )
+            row, review_metadata = self.reviewer.review_and_fix(row, parsed_document, planning)
+            verdict = self.critic.validate(row, parsed_document)
+            if verdict.tag != "VALID":
+                raise RuntimeError("Critic did not return a VALID tag.")
+            return row, review_metadata
+
+        max_workers = max(1, min(self.settings.row_max_workers, len(payload_rows)))
+        if max_workers <= 1 or len(payload_rows) <= 1:
+            results = [handle(payload) for payload in payload_rows]
+        else:
+            indexed: list[tuple[BaseModel, Any] | None] = [None] * len(payload_rows)
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {
+                    executor.submit(handle, payload): index
+                    for index, payload in enumerate(payload_rows)
+                }
+                # Surface the first row failure (fails the whole attempt, as before),
+                # but let in-flight rows settle first.
+                first_error: Exception | None = None
+                for future in as_completed(futures):
+                    index = futures[future]
+                    try:
+                        indexed[index] = future.result()
+                    except Exception as exc:  # noqa: BLE001 - re-raised after drain
+                        if first_error is None:
+                            first_error = exc
+                if first_error is not None:
+                    raise first_error
+            results = [item for item in indexed if item is not None]
+
+        validated_rows = [row for row, _ in results]
+        review_metadata_by_row = [metadata for _, metadata in results]
+        return validated_rows, review_metadata_by_row
 
     def watch_forever(self) -> None:
         self._write_monitor_status(status="running", last_error="", last_results=[])
@@ -579,6 +619,10 @@ class DataTransformationPipeline:
             max_retries=refreshed_settings.max_retries,
             extraction_max_workers=refreshed_settings.extraction_max_workers,
             batch_max_workers=refreshed_settings.batch_max_workers,
+            row_max_workers=refreshed_settings.row_max_workers,
+            llm_max_concurrency=refreshed_settings.llm_max_concurrency,
+            extraction_max_chars_per_chunk=refreshed_settings.extraction_max_chars_per_chunk,
+            enable_region_targeting=refreshed_settings.enable_region_targeting,
             schema_config_path=preserved_schema_path,
             portkey_api_key=refreshed_settings.portkey_api_key,
             gemini_api_key=refreshed_settings.gemini_api_key,

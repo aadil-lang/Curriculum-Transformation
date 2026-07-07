@@ -8,15 +8,17 @@
       "field_type": "string",
       "required": false,
       "output_column": "source",
-      "example_value": "https://www.nsw.gov.au/education-and-training/nesa/curriculum/pdhpe/cafs-stage-6-2022"
+      "example_value": "https://www.nsw.gov.au/education-and-training/nesa/curriculum/pdhpe/cafs-stage-6-2022",
+      "requires_citation": false
     },
     {
       "name": "grade_level",
-      "description": "Broad grade band, such as Primary, Middle, or Senior.",
+      "description": "Broad grade band. Must be exactly Elementary School, Middle School, or High School.",
       "field_type": "string",
       "required": false,
       "output_column": "grade_level",
-      "example_value": "Senior"
+      "example_value": "High School",
+      "requires_citation": false
     },
     {
       "name": "display_grade",
@@ -24,7 +26,8 @@
       "field_type": "string",
       "required": false,
       "output_column": "display_grade",
-      "example_value": "Year 12"
+      "example_value": "Year 12",
+      "requires_citation": false
     },
     {
       "name": "grade_number",
@@ -32,7 +35,8 @@
       "field_type": "string",
       "required": false,
       "output_column": "grade_number",
-      "example_value": "Year 12"
+      "example_value": "Year 12",
+      "requires_citation": false
     },
     {
       "name": "subject",
@@ -40,7 +44,8 @@
       "field_type": "string",
       "required": false,
       "output_column": "Subject",
-      "example_value": "Personal Development, Health and Physical Education (PDHPE)"
+      "example_value": "Personal Development, Health and Physical Education (PDHPE)",
+      "requires_citation": false
     },
     {
       "name": "domain",
@@ -48,7 +53,8 @@
       "field_type": "string",
       "required": false,
       "output_column": "Domain",
-      "example_value": "Community and Family Studies Stage 6 Syllabus (2022)"
+      "example_value": "Community and Family Studies Stage 6 Syllabus (2022)",
+      "requires_citation": false
     },
     {
       "name": "topic",
@@ -56,7 +62,8 @@
       "field_type": "string",
       "required": false,
       "output_column": "Topic",
-      "example_value": null
+      "example_value": null,
+      "requires_citation": false
     },
     {
       "name": "l3",
@@ -64,7 +71,8 @@
       "field_type": "string",
       "required": false,
       "output_column": "L3",
-      "example_value": null
+      "example_value": null,
+      "requires_citation": false
     },
     {
       "name": "l4",
@@ -72,7 +80,8 @@
       "field_type": "string",
       "required": false,
       "output_column": "L4",
-      "example_value": null
+      "example_value": null,
+      "requires_citation": false
     },
     {
       "name": "l5",
@@ -80,7 +89,8 @@
       "field_type": "string",
       "required": false,
       "output_column": "L5",
-      "example_value": null
+      "example_value": null,
+      "requires_citation": false
     },
     {
       "name": "standard_code",
@@ -88,7 +98,8 @@
       "field_type": "string",
       "required": false,
       "output_column": "Standard code",
-      "example_value": "P1.1"
+      "example_value": "P1.1",
+      "requires_citation": true
     },
     {
       "name": "display_standard_code",
@@ -96,7 +107,8 @@
       "field_type": "string",
       "required": false,
       "output_column": "Display standard code",
-      "example_value": "P1.1"
+      "example_value": "P1.1",
+      "requires_citation": false
     },
     {
       "name": "description",
@@ -104,7 +116,8 @@
       "field_type": "string",
       "required": false,
       "output_column": "description",
-      "example_value": "describes the contribution an individual's experiences, values, attitudes and beliefs make to the development of goals"
+      "example_value": "describes the contribution an individual's experiences, values, attitudes and beliefs make to the development of goals",
+      "requires_citation": true
     },
     {
       "name": "czi_standard_code",
@@ -112,7 +125,8 @@
       "field_type": "string",
       "required": false,
       "output_column": "czi_standard_code",
-      "example_value": null
+      "example_value": null,
+      "requires_citation": false
     }
   ],
   "sample_contract": {
@@ -149,7 +163,7 @@
       "czi_standard_code"
     ],
     "subject_naming": "Preserve the full official subject name exactly as shown in the sample, including parenthetical abbreviations when they appear.",
-    "grade_level_naming": "Use the sample's broad grade-level labels, such as: Senior.",
+    "grade_level_naming": "Use exactly one of these grade_level values: Elementary School, Middle School, High School. Map source banding terminology to the closest allowed label. Do not use other labels such as Primary, Middle Years, Senior Years, Secondary, Senior, or similar variants.",
     "display_grade_logic": "Render display_grade in the same user-facing style as the sample, such as: Year 12.",
     "grade_string_logic": "The sample does not define a separate grade_string column. Use the sample's grade representation through the existing grade_number/display_grade fields, such as: Year 12. Do not invent extra grade fields.",
     "display_standard_code_logic": "Display standard code may either mirror the source notation or be synthetic/transformed. Match the sample's display style for this run (for example: P1.1), rather than assuming it must equal the raw source text.",
@@ -197,7 +211,7 @@
     "sample_rows": [
       {
         "source": "https://www.nsw.gov.au/education-and-training/nesa/curriculum/pdhpe/cafs-stage-6-2022",
-        "grade_level": "Senior",
+        "grade_level": "High School",
         "display_grade": "Year 12",
         "grade_number": "Year 12",
         "Subject": "Personal Development, Health and Physical Education (PDHPE)",

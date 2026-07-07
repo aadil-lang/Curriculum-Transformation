@@ -34,7 +34,7 @@ class StubExtractionEngine:
     def __init__(self, schema_path: str | None = None) -> None:
         self.schema_path = schema_path
 
-    def extract(self, parsed_document: Any, prior_error_log: str | None = None) -> Any:
+    def extract(self, parsed_document: Any, prior_error_log: str | None = None, region_override: Any | None = None) -> Any:
         payload_model = get_extraction_payload_model(self.schema_path)
         payload = payload_model.model_validate(_build_stub_payload(self.schema_path))
         planning = PreExtractionUnderstanding(
@@ -58,7 +58,7 @@ class StubCritic:
 
 
 class MissingKeyExtractor:
-    def extract(self, parsed_document: Any, prior_error_log: str | None = None) -> Any:
+    def extract(self, parsed_document: Any, prior_error_log: str | None = None, region_override: Any | None = None) -> Any:
         raise RuntimeError("GEMINI_API_KEY is not configured.")
 
 

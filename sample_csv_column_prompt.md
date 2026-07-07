@@ -9,7 +9,7 @@ Do not hardcode subject-specific assumptions such as:
 - what `subject` must contain
 - whether `domain` is the syllabus name, strand name, or course family
 - whether `topic` is a single heading or a merged topic path
-- whether `grade_level` should be `Middle School`, `High School`, `Senior Years`, or another band
+- whether `grade_level` should be `Elementary School`, `Middle School`, or `High School`
 - whether `display_grade` and `grade_number` are document-level or row-level values
 - whether `source` should be a local file name, canonical public URL, PDF URL, or row-specific webpage URL
 
@@ -30,7 +30,7 @@ Create a sample CSV using this exact column intent:
 Fill the columns as follows:
 
 - `source`: Put the exact source URL that supports that specific row. If a subject uses multiple source links, rows from different documents or webpages may have different `source` values within the same CSV. Do not force a single common source when the rows actually come from multiple links.
-- `grade_level`: Use the broad schooling band shown or implied by the source, such as `Elementary School`, `Middle School`, `High School`, `Middle Years`, `Senior Years`, `Secondary`, or a similar official grouping.
+- `grade_level`: Use exactly one of `Elementary School`, `Middle School`, or `High School`. Map source banding to the closest allowed label; do not use other labels such as `Primary`, `Middle Years`, `Senior Years`, `Secondary`, or `Senior`.
 - `display_grade`: Use the grade, stage, or displayed learner band exactly as it should appear to a reader, such as `K`, `1`, `9`, `Stage 4`, `Life Skills for Stage 4/5`, or `9-12`.
 - `grade_number`: Use the sortable/internal grade value. If the source uses stages instead of grades, keep the stage label. If the source uses a numeric grade band such as `9-12`, expand it to `9,10,11,12` instead of keeping the range as a single token. Do not put spaces after commas.
 - `subject`: Use the main subject area or official parent subject name.
@@ -72,7 +72,7 @@ Fill the columns as follows:
 Before drafting sample rows or running full extraction, determine the meaning of every output column for the current subject and source.
 
 - Infer `source` format from the approved sample when available. Prefer canonical public source links over local file names when the public source can be identified reliably from the staged source or document metadata.
-- Infer `grade_level` from the sample's schooling-band style first, then from the source's official banding terminology.
+- Infer `grade_level` from the source's official banding terminology, but always normalize it to exactly one of `Elementary School`, `Middle School`, or `High School`.
 - Infer `display_grade` from the row-level or section-level learner/stage label that the sample pattern expects. Do not force one document-wide value if the source clearly contains row-specific stage bands such as `Stage 4`, `Stage 5`, and `Life Skills`.
 - Infer `grade_number` from the sample's normalization style. If the sample keeps stage labels, keep stage labels. If the sample expands grade ranges, expand them consistently.
 - Infer `subject` from the approved sample's scope. In some subjects it may be the parent learning area; in others it may be the course title itself. Do not assume one universal pattern.

@@ -11,6 +11,58 @@ from config import DEFAULT_SCHEMA_CONFIG_PATH, Settings, get_settings
 
 FieldType = Literal["string", "integer", "number", "boolean"]
 SOURCE_CITATION_SUFFIX = "_source_citation"
+ALLOWED_GRADE_LEVELS = ("Elementary School", "Middle School", "High School")
+GRADE_LEVEL_NAMING_RULE = (
+    "Use exactly one of these grade_level values: Elementary School, Middle School, High School. "
+    "Map source banding terminology to the closest allowed label. Do not use other labels such as "
+    "Primary, Middle Years, Senior Years, Secondary, Senior, or similar variants."
+)
+
+
+def normalize_grade_level(value: str | None) -> str | None:
+    if not value or not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    if normalized in ALLOWED_GRADE_LEVELS:
+        return normalized
+
+    lowered = normalized.casefold()
+    elementary_aliases = {"elementary school", "elementary", "primary school", "primary", "k-5", "k-6"}
+    middle_aliases = {"middle school", "middle", "junior high", "junior high school", "middle years", "junior"}
+    high_aliases = {"high school", "high", "senior school", "senior years", "senior", "secondary school", "secondary"}
+    if lowered in elementary_aliases or lowered.startswith(("elementary", "primary")):
+        return "Elementary School"
+    if lowered in middle_aliases or lowered.startswith("middle"):
+        return "Middle School"
+    if lowered in high_aliases or lowered.startswith(("high", "senior", "secondary")):
+        return "High School"
+    return None
+
+
+# Fields whose value is derived/transformed/inherited rather than copied verbatim
+# from the source (e.g. a canonical URL, a mapped grade band, a topic inferred from
+# a section heading, a synthetic display code). These cannot always carry a verbatim
+# citation, so citation enforcement is relaxed for them.
+DERIVED_FIELD_NAMES = frozenset(
+    {
+        "source",
+        "grade_level",
+        "display_grade",
+        "grade_number",
+        "subject",
+        "domain",
+        "topic",
+        "l3",
+        "l4",
+        "l5",
+        "display_standard_code",
+        "czi_standard_code",
+    }
+)
+
+
+def default_requires_citation(field_name: str) -> bool:
+    return field_name not in DERIVED_FIELD_NAMES
 
 
 class SchemaFieldSpec(BaseModel):
@@ -20,6 +72,7 @@ class SchemaFieldSpec(BaseModel):
     required: bool = False
     output_column: str | None = None
     example_value: str | None = None
+    requires_citation: bool = True
 
 
 class SampleTransformationContract(BaseModel):
@@ -54,6 +107,7 @@ class TargetSchemaConfig(BaseModel):
 class CitationPayloadBase(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
     __schema_field_names__: tuple[str, ...] = ()
+    __citation_required_fields__: frozenset[str] = frozenset()
 
     @model_validator(mode="after")
     def validate_field_citations(self) -> "CitationPayloadBase":
@@ -65,13 +119,17 @@ class CitationPayloadBase(BaseModel):
             has_value = value is not None and not (isinstance(value, str) and not value.strip())
             has_citation = bool(citation and citation.strip())
 
-            if has_value and not has_citation:
+            citation_required = field_name in self.__class__.__citation_required_fields__
+            if has_value and not has_citation and citation_required:
                 raise ValueError(f"Field '{field_name}' requires a non-empty source citation.")
-            if not has_value and has_citation:
+            if not has_value and has_citation and citation_required:
                 raise ValueError(
                     f"Field '{citation_name}' must be empty when '{field_name}' is null or blank."
                 )
         return self
+
+
+PIPELINE_METADATA_FIELDS = ("source_document", "source_type", "source_identifier", "processed_at_utc")
 
 
 class CsvRowBase(CitationPayloadBase):
@@ -79,6 +137,35 @@ class CsvRowBase(CitationPayloadBase):
     source_type: Literal["pdf", "docx", "website"]
     source_identifier: str
     processed_at_utc: str
+
+
+def schema_only_row_view(row: BaseModel) -> dict[str, Any]:
+    """Row content minus pipeline-managed metadata fields.
+
+    The critic and reviewer must judge rows against the sample contract only.
+    Exposing pipeline metadata (source_document, processed_at_utc, ...) makes the
+    LLM flag those fields as contract violations, so hide them from review.
+    """
+    data = row.model_dump(mode="json")
+    return {key: value for key, value in data.items() if key not in PIPELINE_METADATA_FIELDS}
+
+
+def critic_row_view(row: BaseModel, schema_config: "TargetSchemaConfig") -> dict[str, Any]:
+    """Row view for the critic that hides citation keys for derived fields.
+
+    Prompt instructions alone do not stop the critic LLM from demanding verbatim
+    citations on derived/transformed fields (source, topic, grade_level, ...).
+    Removing those citation keys entirely means the critic cannot object to a
+    citation it never sees. Citation keys for verbatim fields (description,
+    standard_code) are kept so those remain audited.
+    """
+    data = schema_only_row_view(row)
+    hidden_citations = {
+        f"{spec.name}{SOURCE_CITATION_SUFFIX}"
+        for spec in schema_config.fields
+        if not spec.requires_citation
+    }
+    return {key: value for key, value in data.items() if key not in hidden_citations}
 
 
 def _map_field_type(field_type: FieldType) -> type[Any]:
@@ -129,6 +216,10 @@ def get_output_column_name(spec: SchemaFieldSpec) -> str:
     return spec.output_column or spec.name
 
 
+def _citation_required_fields(schema_config: TargetSchemaConfig) -> frozenset[str]:
+    return frozenset(spec.name for spec in schema_config.fields if spec.requires_citation)
+
+
 def get_extraction_payload_model(schema_path: str | None = None) -> type[BaseModel]:
     schema_config = load_schema_config(schema_path)
     model = create_model(
@@ -138,6 +229,7 @@ def get_extraction_payload_model(schema_path: str | None = None) -> type[BaseMod
         **_build_dynamic_fields(schema_config),
     )
     model.__schema_field_names__ = tuple(spec.name for spec in schema_config.fields)
+    model.__citation_required_fields__ = _citation_required_fields(schema_config)
     return model
 
 
@@ -150,6 +242,7 @@ def get_target_row_model(schema_path: str | None = None) -> type[BaseModel]:
         **_build_dynamic_fields(schema_config),
     )
     model.__schema_field_names__ = tuple(spec.name for spec in schema_config.fields)
+    model.__citation_required_fields__ = _citation_required_fields(schema_config)
     return model
 
 

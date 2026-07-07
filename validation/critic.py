@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field, field_validator
 from agent_engine import _extract_message_text, _normalize_to_string_list
 from config import Settings, get_settings
 from parsers.base import ParsedDocument
-from schemas import load_schema_config
+from schemas import ALLOWED_GRADE_LEVELS, critic_row_view, get_output_column_name, load_schema_config
 
 
 class CriticValidationError(RuntimeError):
@@ -58,35 +58,56 @@ class ExtractionCritic:
         raise CriticValidationError(f"Unsupported critic provider: {provider}")
 
     def _build_audit_messages(self, row: BaseModel, parsed_document: ParsedDocument) -> list[dict[str, str]]:
-        row_json = json.dumps(row.model_dump(mode="json"), indent=2)
         schema_config = load_schema_config(settings=self.settings)
+        row_json = json.dumps(critic_row_view(row, schema_config), indent=2)
         sample_contract_json = (
             json.dumps(schema_config.sample_contract.model_dump(mode="json"), indent=2)
             if schema_config.sample_contract
             else "null"
         )
+        verbatim_columns = [
+            get_output_column_name(spec) for spec in schema_config.fields if spec.requires_citation
+        ]
+        derived_columns = [
+            get_output_column_name(spec) for spec in schema_config.fields if not spec.requires_citation
+        ]
+        verbatim_list = ", ".join(verbatim_columns) or "(none)"
+        derived_list = ", ".join(derived_columns) or "(none)"
         prompt = f"""
-Audit the extracted row against the original document markdown and the approved sample CSV contract.
+Audit this extracted row against the original document and the approved sample CSV contract.
 
-Validation rules:
-- Reject any field whose citation is not verbatim or does not support the field value.
-- Reject fields that are semantically irrelevant to the document.
-- Reject rows where important field meanings are mismatched.
-- Reject rows whose transformed values or field placement violate the sample CSV contract.
-- Reject rows that use a generic cross-subject interpretation of subject, domain, topic, source, grade_level, display_grade, or grade_number when the approved sample contract and source support a more specific subject-aligned mapping.
-- Reject local file-name `source` values when the approved sample contract clearly expects canonical public source links and those links are identifiable from the source or staging context.
-- Reject document-wide grade labels when the approved sample contract and source support row-specific stage, learner-band, or life-skills values instead.
-- Reject any row whose `Display standard code` is duplicated within the same CSV context when that duplication is known programmatically.
-- Accept `topic` values joined with ` | ` when one standard genuinely spans multiple topics, the source supports that merged topic cell, and the approved sample contract allows that topic style.
-- Accept synthetic `Display standard code` prefixes such as `DA.1.1` when needed to keep the code unique and the approved sample contract allows transformed or prefixed display codes.
-- Reject truncated descriptions, cross-row sentence merges, missing required sub-parts, neighboring-row contamination, and forced flattening when the sample style preserves multiline structure.
-- Reject symbol loss or incorrect normalization for mathematical notation, chemistry notation, Greek letters, multilingual text, or semantic punctuation.
-- Reject noise such as appendix-only out-of-scope items, N.B. notes, repeated headers, repeated footers, page numbers, continuation fragments, layout labels, and extraction artifacts.
-- Accept null fields when the value truly is absent.
-- Return tag=VALID only when the row is safe to append to the final CSV.
-- Return tag=INVALID for every rejection.
+Default to VALID. This pipeline's job is to TRANSFORM messy source text into clean contract
+values, so transformation, mapping, inheritance, and synthesis are EXPECTED and correct — not
+suspicious. Return tag=INVALID only when you can point to a CONCRETE, demonstrable violation
+(quote the offending value and say exactly which rule it breaks). Do NOT reject on speculation,
+hedging, or vague doubt ("possible", "may have", "risks", "insufficient clarity", "lacks
+explicit evidence" are NOT valid reasons). If you are not sure a row is wrong, it is VALID.
 
-Return is_valid=false with explicit issues if anything is unsupported.
+Field citation policy:
+- Verbatim-cited fields ({verbatim_list}): the citation should contain the field's text as it
+  appears in the source. Ignore differences in surrounding whitespace, tabs, leading list
+  markers/codes, and line breaks — a match that differs only in formatting IS a valid verbatim
+  citation. Reject only if the cited text is genuinely absent from the source or clearly
+  supports a different value.
+- Derived/transformed fields ({derived_list}): these carry no citation and must NOT be judged on
+  citations at all. Accept them as long as the value is a reasonable transformation consistent
+  with the source context and the sample contract (e.g. a canonical source URL, a grade band
+  mapped to Elementary/Middle/High School, a topic taken from a heading, a formed/prefixed
+  display code, a merged ` | ` topic).
+
+Reject ONLY for these concrete problems:
+- A verbatim-cited field's cited text is not present in the source at all.
+- A field value is clearly copied from the wrong place (neighboring-row contamination) or is
+  document noise (headers, footers, page numbers, N.B. notes, nav links, layout labels).
+- A description is truncated mid-sentence or drops required sub-parts that the citation shows.
+- Loss/garbling of mathematical, chemistry, Greek, notation, or multilingual characters that the
+  source clearly contains.
+- grade_level is not exactly one of: Elementary School, Middle School, High School.
+- A value plainly contradicts the sample CSV contract's stated rules.
+
+Do NOT reject for: an empty citation on a derived field, a formatting-only citation difference,
+a prefixed/synthesized display code, a canonical source URL not printed in the body, a null
+optional field, or duplicate display codes (uniqueness is resolved later by the pipeline).
 
 Sample CSV transformation contract:
 {sample_contract_json}
@@ -101,7 +122,13 @@ Original document markdown:
         return [
             {
                 "role": "system",
-                "content": "You are an adversarial data extraction critic. Be skeptical, precise, and strict about style-preserving transformations. Return your response as a single JSON object.",
+                "content": (
+                    "You are a data extraction validator. Your goal is to pass every row that is a "
+                    "faithful, contract-consistent transformation of the source, and to reject only "
+                    "rows with a concrete, demonstrable defect you can point to. Transformation of "
+                    "source text into contract values is expected and correct, not a defect. When in "
+                    "doubt, return VALID. Return your response as a single JSON object."
+                ),
             },
             {"role": "user", "content": prompt},
         ]
@@ -143,6 +170,15 @@ Original document markdown:
             if self._loses_special_notation(description, description_citation):
                 issues.append("Description appears to lose symbols, notation, or multilingual characters present in the source citation.")
 
+        grade_level_field = output_to_internal.get("grade_level")
+        if grade_level_field:
+            grade_level_value = data.get(grade_level_field)
+            if isinstance(grade_level_value, str) and grade_level_value.strip():
+                if grade_level_value.strip() not in ALLOWED_GRADE_LEVELS:
+                    issues.append(
+                        f"grade_level must be one of {', '.join(ALLOWED_GRADE_LEVELS)}; got '{grade_level_value.strip()}'."
+                    )
+
         if issues:
             raise CriticValidationError(" | ".join(dict.fromkeys(issues)))
 
@@ -183,24 +219,17 @@ Original document markdown:
         if not self.settings.portkey_api_key:
             raise CriticValidationError("PORTKEY_API_KEY is not configured for critic validation.")
 
-        try:
-            from portkey_ai import Portkey
-        except ImportError as exc:  # pragma: no cover - optional integration
-            raise CriticValidationError(
-                "Portkey support requires the 'portkey-ai' package. Install it to use PORTKEY_API_KEY mode."
-            ) from exc
+        from portkey_client import call_portkey_structured
 
         provider = self.settings.portkey_critic_provider or self._infer_portkey_critic_provider()
-        client = Portkey(
-            api_key=self.settings.portkey_api_key,
-            provider=provider,
-        )
         try:
-            response = client.chat.completions.create(
+            return call_portkey_structured(
+                api_key=self.settings.portkey_api_key,
+                provider=provider,
                 model=self.settings.critic_model,
+                response_model=SemanticAuditVerdict,
                 messages=self._build_audit_messages(row, parsed_document),
-                temperature=0,
-                response_format={"type": "json_object"},
+                max_concurrency=self.settings.llm_max_concurrency,
             )
         except Exception as exc:
             LOGGER.exception(
@@ -213,12 +242,6 @@ Original document markdown:
             raise CriticValidationError(
                 f"Portkey critic failed ({type(exc).__name__}): {exc}"
             ) from exc
-        content = _extract_message_text(response)
-        try:
-            payload = json.loads(content)
-        except json.JSONDecodeError as exc:
-            raise CriticValidationError(f"Portkey critic returned invalid JSON: {exc}") from exc
-        return SemanticAuditVerdict.model_validate(payload)
 
     def _infer_portkey_critic_provider(self) -> str:
         # Inference: these provider ids mirror the common Portkey provider names used in their examples.

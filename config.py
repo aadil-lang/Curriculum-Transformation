@@ -73,6 +73,18 @@ class Settings:
     batch_max_workers: int = field(
         default_factory=lambda: max(1, int(os.getenv("BATCH_MAX_WORKERS", str(min(4, max(1, cpu_count()))))))
     )
+    row_max_workers: int = field(
+        default_factory=lambda: max(1, int(os.getenv("ROW_MAX_WORKERS", "6")))
+    )
+    llm_max_concurrency: int = field(
+        default_factory=lambda: max(1, int(os.getenv("LLM_MAX_CONCURRENCY", "12")))
+    )
+    extraction_max_chars_per_chunk: int = field(
+        default_factory=lambda: max(4000, int(os.getenv("EXTRACTION_MAX_CHARS_PER_CHUNK", "45000")))
+    )
+    enable_region_targeting: bool = field(
+        default_factory=lambda: os.getenv("ENABLE_REGION_TARGETING", "1").strip().lower() not in {"0", "false", "no", ""}
+    )
     schema_config_path: Path = field(
         default_factory=lambda: Path(os.getenv("SCHEMA_CONFIG_PATH", str(DEFAULT_SCHEMA_CONFIG_PATH)))
     )

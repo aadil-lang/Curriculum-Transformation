@@ -15,13 +15,15 @@ from typing import Any, Callable
 
 from pydantic import BaseModel, Field, create_model
 
-from agent_engine import _extract_message_text, _strip_json_code_fence
+from agent_engine import ExtractionRegion, _extract_message_text, _strip_json_code_fence
 from config import DEFAULT_SCHEMA_CONFIG_PATH, ROOT_DIR, RuntimePaths, Settings, get_runtime_paths
 from pipeline import DataTransformationPipeline, ProcessResult
 from schemas import (
+    GRADE_LEVEL_NAMING_RULE,
     SampleTransformationContract,
     SchemaFieldSpec,
     TargetSchemaConfig,
+    default_requires_citation,
     load_schema_config,
 )
 
@@ -47,6 +49,7 @@ class ChatBatchSpec(BaseModel):
     draft_only: bool = False
     sample_row_target: int | None = None
     output_csv_name: str | None = None
+    extraction_region: dict[str, Any] | None = None
 
 
 class ChatBatchRequest(BaseModel):
@@ -198,10 +201,13 @@ def _run_single_batch(
         )
 
     batch_settings = create_model_settings(settings, schema_path)
+    region_override = ExtractionRegion.model_validate(batch.extraction_region) if batch.extraction_region else None
     pipeline = (
         pipeline_factory(batch_settings, runtime_paths)
         if pipeline_factory
-        else DataTransformationPipeline(settings=batch_settings, runtime_paths=runtime_paths)
+        else DataTransformationPipeline(
+            settings=batch_settings, runtime_paths=runtime_paths, region_override=region_override
+        )
     )
     process_results = pipeline.process_paths(resolved_input_files)
     output_csv_path = str(runtime_paths.final_csv_path)
@@ -243,6 +249,7 @@ def create_schema_from_sample_csv(sample_csv_path: Path, batch_name: str) -> Tar
                 required=False,
                 output_column=header,
                 example_value=_first_non_empty([row.get(header, "") for row in rows]),
+                requires_citation=default_requires_citation(internal_name),
             )
         )
 
@@ -297,6 +304,10 @@ def create_model_settings(settings: Settings, schema_path: Path) -> Settings:
         max_retries=settings.max_retries,
         extraction_max_workers=settings.extraction_max_workers,
         batch_max_workers=settings.batch_max_workers,
+        row_max_workers=settings.row_max_workers,
+        llm_max_concurrency=settings.llm_max_concurrency,
+        extraction_max_chars_per_chunk=settings.extraction_max_chars_per_chunk,
+        enable_region_targeting=settings.enable_region_targeting,
         schema_config_path=schema_path,
         portkey_api_key=settings.portkey_api_key,
         gemini_api_key=settings.gemini_api_key,
@@ -1068,10 +1079,7 @@ def _infer_subject_naming(examples: list[str]) -> str:
 
 
 def _infer_grade_level_naming(examples: list[str]) -> str:
-    if not examples:
-        return "Use the same broad grade-band naming style shown in the sample CSV."
-    joined = ", ".join(sorted(set(examples)))
-    return f"Use the sample's broad grade-level labels, such as: {joined}."
+    return GRADE_LEVEL_NAMING_RULE
 
 
 def _infer_display_grade_logic(examples: list[str]) -> str:

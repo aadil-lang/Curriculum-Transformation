@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field, create_model
 from agent_engine import PreExtractionUnderstanding, _extract_message_text
 from config import Settings, get_settings
 from parsers.base import ParsedDocument
-from schemas import load_schema_config
+from schemas import PIPELINE_METADATA_FIELDS, get_extraction_payload_model, load_schema_config, normalize_grade_level, schema_only_row_view
 
 
 LOGGER = logging.getLogger(__name__)
@@ -78,6 +78,16 @@ class TransformationReviewer:
                     f"Normalized grade_number '{grade_number_value}' to '{normalized_grade_numbers}'."
                 )
 
+        grade_level_field = output_to_internal.get("grade_level")
+        if grade_level_field:
+            grade_level_value = data.get(grade_level_field)
+            normalized_grade_level = normalize_grade_level(grade_level_value)
+            if normalized_grade_level and normalized_grade_level != grade_level_value:
+                data[grade_level_field] = normalized_grade_level
+                fixes.append(
+                    f"Normalized grade_level '{grade_level_value}' to '{normalized_grade_level}'."
+                )
+
         topic_field = output_to_internal.get("topic")
         if topic_field:
             topic_value = data.get(topic_field)
@@ -97,17 +107,23 @@ class TransformationReviewer:
         planning: PreExtractionUnderstanding,
     ) -> tuple[BaseModel, TransformationReviewMetadata]:
         row_model = row.__class__
+        payload_model = get_extraction_payload_model(str(self.settings.schema_config_path))
         response_model = create_model(
             "TransformationReviewEnvelope",
             __base__=BaseModel,
             __module__=__name__,
             review=(TransformationReviewMetadata, Field(description="Review findings and applied fixes.")),
-            corrected_row=(row_model, Field(description="Corrected row after review.")),
+            corrected_row=(payload_model, Field(description="Corrected row after review.")),
         )
 
         messages = self._build_review_messages(row, parsed_document, planning)
         response = self._call_review_model(response_model, messages)
-        return response.corrected_row, response.review
+
+        # The model only sees and returns schema fields; merge back the pipeline
+        # metadata from the original row so the full CsvRow can be reconstructed.
+        metadata = {field: getattr(row, field) for field in PIPELINE_METADATA_FIELDS}
+        corrected_row = row_model.model_validate({**metadata, **response.corrected_row.model_dump()})
+        return corrected_row, response.review
 
     def _build_review_messages(
         self,
@@ -123,7 +139,7 @@ class TransformationReviewer:
             else "null"
         )
         planning_json = json.dumps(planning.model_dump(mode="json"), indent=2)
-        row_json = json.dumps(row.model_dump(mode="json"), indent=2)
+        row_json = json.dumps(schema_only_row_view(row), indent=2)
 
         system_prompt = (
             "You are a transformation evaluator and fixer. "
@@ -132,6 +148,7 @@ class TransformationReviewer:
             "Do not invent missing facts. "
             "Preserve citations, symbols, multilingual content, multiline structure, and row boundaries. "
             "Do not hardcode one hierarchy interpretation across subjects; preserve the subject-specific column meanings inferred from the sample contract and source. "
+            "grade_level must be exactly one of: Elementary School, Middle School, High School. "
             "Return your response as a single JSON object."
         )
 
@@ -151,6 +168,7 @@ Current transformed row:
 Review goals:
 - check whether the transformation matches the source and the sample contract
 - check whether subject, domain, topic, grade_level, display_grade, grade_number, and source follow the sample-derived column semantics for this subject rather than a generic cross-subject assumption
+- normalize grade_level to exactly Elementary School, Middle School, or High School when the source supports that mapping
 - fix incorrect placement, formatting, merged/split text issues, or minor transformation errors when the source supports a correction
 - if the approved sample pattern implies a canonical public source link and the source supports identifying it, prefer that canonical link over a local staged file name
 - if the approved sample pattern implies row-specific stage or learner-band values, do not collapse them into one document-wide grade label
@@ -224,21 +242,17 @@ Original document markdown:
         if not self.settings.portkey_api_key:
             raise TransformationReviewError("PORTKEY_API_KEY is not configured for transformation review.")
 
-        try:
-            from portkey_ai import Portkey
-        except ImportError as exc:  # pragma: no cover
-            raise TransformationReviewError(
-                "Portkey support requires the 'portkey-ai' package. Install it to use PORTKEY_API_KEY mode."
-            ) from exc
+        from portkey_client import call_portkey_structured
 
         provider = self.settings.portkey_critic_provider or "@openai"
-        client = Portkey(api_key=self.settings.portkey_api_key, provider=provider)
         try:
-            response = client.chat.completions.create(
+            return call_portkey_structured(
+                api_key=self.settings.portkey_api_key,
+                provider=provider,
                 model=self.settings.critic_model,
+                response_model=response_model,
                 messages=messages,
-                temperature=0,
-                response_format={"type": "json_object"},
+                max_concurrency=self.settings.llm_max_concurrency,
             )
         except Exception as exc:
             LOGGER.exception(
@@ -251,13 +265,6 @@ Original document markdown:
             raise TransformationReviewError(
                 f"Portkey transformation review failed ({type(exc).__name__}): {exc}"
             ) from exc
-
-        content = _extract_message_text(response)
-        try:
-            payload = json.loads(content)
-        except json.JSONDecodeError as exc:
-            raise TransformationReviewError(f"Transformation reviewer returned invalid JSON: {exc}") from exc
-        return response_model.model_validate(payload)
 
 
 def _normalize_grade_number_value(value: Any) -> str | None:
