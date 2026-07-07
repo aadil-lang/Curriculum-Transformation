@@ -68,18 +68,18 @@ def parse_provider_fallbacks(raw: str) -> list[tuple[str, str]]:
 
 @dataclass(slots=True)
 class Settings:
-    extractor_model: str = field(default_factory=lambda: os.getenv("EXTRACTOR_MODEL", "gemini-3.5-flash"))
+    extractor_model: str = field(default_factory=lambda: os.getenv("EXTRACTOR_MODEL", "anthropic.claude-opus-4-6"))
     extractor_provider: str = field(default_factory=lambda: os.getenv("EXTRACTOR_PROVIDER", "gemini"))
     critic_provider: str = field(default_factory=lambda: os.getenv("CRITIC_PROVIDER", "openai").lower())
-    critic_model: str = field(default_factory=lambda: os.getenv("CRITIC_MODEL", "gpt-5.5"))
+    critic_model: str = field(default_factory=lambda: os.getenv("CRITIC_MODEL", "gpt-4o"))
     execution_mode: Literal["direct_provider"] = field(
         default_factory=lambda: os.getenv("EXECUTION_MODE", DIRECT_PROVIDER_EXECUTION_MODE).strip().lower()
     )
     portkey_extractor_provider: str = field(
-        default_factory=lambda: os.getenv("PORTKEY_EXTRACTOR_PROVIDER", "@google-ai")
+        default_factory=lambda: os.getenv("PORTKEY_EXTRACTOR_PROVIDER", "@vertex-global-region")
     )
     portkey_critic_provider: str = field(
-        default_factory=lambda: os.getenv("PORTKEY_CRITIC_PROVIDER", "")
+        default_factory=lambda: os.getenv("PORTKEY_CRITIC_PROVIDER", "@azure-openai-bbfaac")
     )
     extractor_fallbacks: list[tuple[str, str]] = field(
         default_factory=lambda: parse_provider_fallbacks(
