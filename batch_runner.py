@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import html.parser
 import json
+import logging
 import re
 import urllib.error
 import urllib.parse
@@ -16,7 +17,7 @@ from typing import Any, Callable
 from pydantic import BaseModel, Field
 
 from extractor import ExtractionRegion, _extract_message_text, _strip_json_code_fence
-from config import DEFAULT_SCHEMA_CONFIG_PATH, ROOT_DIR, RuntimePaths, Settings, get_runtime_paths
+from config import DEFAULT_SCHEMA_CONFIG_PATH, ROOT_DIR, RuntimePaths, Settings, get_runtime_paths, get_settings
 from pipeline import DataTransformationPipeline
 from schemas import (
     GRADE_LEVEL_NAMING_RULE,
@@ -28,10 +29,12 @@ from schemas import (
 )
 
 
+LOGGER = logging.getLogger(__name__)
+
 CHAT_BATCH_OUTPUT_DIR = ROOT_DIR / "output" / "chat_batches"
 URL_PATTERN = re.compile(r"^https?://", re.IGNORECASE)
-DOWNLOADABLE_REMOTE_SUFFIXES = {".pdf", ".docx", ".doc", ".csv"}
-DIRECT_DOCUMENT_SUFFIXES = {".pdf", ".docx", ".doc"}
+DOWNLOADABLE_REMOTE_SUFFIXES = {".pdf", ".docx", ".doc", ".rtf", ".csv"}
+DIRECT_DOCUMENT_SUFFIXES = {".pdf", ".docx", ".doc", ".rtf"}
 MANIFEST_SOURCE_COLUMN_NAMES = ("source", "source_url", "document_url", "pdf_url", "url")
 MIN_SAMPLE_ROWS = 6
 MAX_SAMPLE_ROWS = 10
@@ -50,6 +53,7 @@ class ChatBatchSpec(BaseModel):
     sample_row_target: int | None = None
     output_csv_name: str | None = None
     extraction_region: dict[str, Any] | None = None
+    program_filter: str | None = None
 
 
 class ChatBatchRequest(BaseModel):
@@ -109,6 +113,7 @@ def build_chat_batch_request(
     infer_schema: bool,
     draft_only: bool,
     output_csv_name: str | None,
+    program_filter: str | None = None,
 ) -> ChatBatchRequest:
     return ChatBatchRequest(
         batches=[
@@ -120,6 +125,7 @@ def build_chat_batch_request(
                 infer_schema=infer_schema,
                 draft_only=draft_only,
                 output_csv_name=output_csv_name,
+                program_filter=program_filter,
             )
         ]
     )
@@ -136,7 +142,7 @@ def _run_single_batch(
     schema_path = runtime_paths.output_dir / "schema_config.json"
 
     resolved_input_files, source_url_map = _materialize_input_references_with_urls(
-        batch.input_files, runtime_paths
+        batch.input_files, runtime_paths, settings=settings, program_filter=batch.program_filter
     )
     resolved_sample_csv = _materialize_optional_sample_csv(batch.sample_csv, runtime_paths)
     sample_manifest_inputs = (
@@ -353,7 +359,10 @@ def _materialize_input_references(references: list[str], runtime_paths: RuntimeP
 
 
 def _materialize_input_references_with_urls(
-    references: list[str], runtime_paths: RuntimePaths
+    references: list[str],
+    runtime_paths: RuntimePaths,
+    settings: Settings | None = None,
+    program_filter: str | None = None,
 ) -> tuple[list[Path], dict[str, str]]:
     """Materialize inputs and return (paths, {staged_path: origin_url}).
 
@@ -363,10 +372,25 @@ def _materialize_input_references_with_urls(
     materialized: list[Path] = []
     url_map: dict[str, str] = {}
     for index, reference in enumerate(references):
+        default_stub = f"chat_input_{index + 1}"
+
+        # A webpage URL that is really an index of many downloadable program
+        # documents (e.g. an FLDOE curriculum-frameworks page) expands into one
+        # staged document per linked program, each keyed to its own source URL.
+        if _looks_like_url(reference):
+            suffix = Path(urllib.parse.urlparse(reference).path).suffix.lower()
+            if suffix not in DOWNLOADABLE_REMOTE_SUFFIXES:
+                harvested = _try_expand_web_index(reference, runtime_paths, settings, program_filter)
+                if harvested:
+                    for harvested_doc in harvested:
+                        url_map[str(harvested_doc.path)] = harvested_doc.source_url
+                        materialized.append(harvested_doc.path)
+                    continue
+
         path = _materialize_reference(
             reference=reference,
             destination_dir=runtime_paths.input_dir,
-            default_stub=f"chat_input_{index + 1}",
+            default_stub=default_stub,
         )
         if path.suffix.lower() == ".csv":
             manifest_inputs = _expand_manifest_csv_inputs(
@@ -385,6 +409,66 @@ def _materialize_input_references_with_urls(
         materialized.append(path)
 
     return _merge_unique_paths(materialized, []), url_map
+
+
+def _try_expand_web_index(
+    reference: str,
+    runtime_paths: RuntimePaths,
+    settings: Settings | None,
+    program_filter: str | None = None,
+) -> list["HarvestedDocument"]:
+    """Return harvested program documents when a webpage is a multi-doc index.
+
+    Returns an empty list (so the caller falls back to single-page handling)
+    when index expansion is disabled, the page links fewer than the configured
+    minimum documents, or harvesting fails for any reason. When an explicit
+    program filter is supplied, the minimum-documents threshold is bypassed so a
+    deliberate 1-2 program selection still expands.
+    """
+    active_settings = settings or get_settings()
+    if not active_settings.enable_web_index_expansion:
+        return []
+
+    from parsers.web_parser import harvest_index_documents, parse_program_filter
+
+    filter_terms = parse_program_filter(program_filter)
+    max_documents = active_settings.web_index_max_documents or None
+    try:
+        harvested = harvest_index_documents(
+            reference,
+            runtime_paths.input_dir,
+            max_documents=max_documents,
+            filename_for=_harvested_document_filename,
+            program_filter=filter_terms,
+        )
+    except Exception as exc:  # noqa: BLE001 - fall back to single-page crawl on any failure
+        LOGGER.warning("Web index expansion failed for %s; falling back to single page. %r", reference, exc)
+        return []
+
+    # An explicit filter is a deliberate selection: honor even a single match.
+    minimum = 1 if filter_terms else active_settings.web_index_min_documents
+    if len(harvested) < minimum:
+        LOGGER.info(
+            "Web index expansion for %s found %d document link(s) (< threshold %d); using single page.",
+            reference,
+            len(harvested),
+            minimum,
+        )
+        return []
+
+    LOGGER.info("Web index expansion for %s produced %d program documents.", reference, len(harvested))
+    return harvested
+
+
+def _harvested_document_filename(url: str, label: str, position: int) -> str:
+    # Prefer the original filename (e.g. a unique course code like
+    # 9514000-2526.rtf); fall back to the link label or a positional stub.
+    original_name = Path(urllib.parse.urlparse(url).path).name
+    if original_name and Path(original_name).suffix:
+        return _safe_filename(original_name)
+    suffix = Path(original_name).suffix.lower() or ".dat"
+    stem_source = label.strip() or f"program_{position}"
+    return f"{_safe_stem(stem_source)}{suffix}"
 
 
 def _materialize_reference(reference: str, destination_dir: Path, default_stub: str) -> Path:
@@ -416,14 +500,32 @@ def _download_remote_file(reference: str, destination_dir: Path, candidate_name:
     safe_name = _safe_filename(candidate_name)
     destination_path = _dedupe_path(destination_dir / safe_name)
 
+    request = urllib.request.Request(reference, headers={"User-Agent": "Mozilla/5.0"})
     try:
-        with urllib.request.urlopen(reference) as response:
+        with urllib.request.urlopen(request) as response:
             payload = response.read()
+        destination_path.write_bytes(payload)
+        return destination_path
+    except urllib.error.HTTPError as exc:
+        # Edge bot-protection (e.g. Akamai on fldoe.org) rejects plain HTTP with
+        # 403/406. Retry through a warmed browser context, which passes the
+        # clearance challenge and can fetch the file.
+        if exc.code in (401, 403, 406, 429):
+            if _download_via_browser(reference, destination_path):
+                return destination_path
+        raise RuntimeError(f"Could not download remote input: {reference}. {exc}") from exc
     except urllib.error.URLError as exc:
         raise RuntimeError(f"Could not download remote input: {reference}. {exc}") from exc
 
-    destination_path.write_bytes(payload)
-    return destination_path
+
+def _download_via_browser(reference: str, destination_path: Path) -> bool:
+    try:
+        from parsers.web_parser import download_protected_file
+
+        return download_protected_file(reference, destination_path)
+    except Exception as exc:  # noqa: BLE001 - fallback failure surfaces as the original HTTP error
+        LOGGER.warning("Browser-download fallback failed for %s: %r", reference, exc)
+        return False
 
 
 def _expand_manifest_csv_inputs(
@@ -1375,7 +1477,7 @@ class _DocumentLinkParser(html.parser.HTMLParser):
     def _looks_like_document_link(url: str, attributes: dict[str, str]) -> bool:
         lowered_url = url.lower()
         path_only = urllib.parse.urlparse(lowered_url).path
-        if path_only.endswith((".pdf", ".docx", ".doc")):
+        if path_only.endswith((".pdf", ".docx", ".doc", ".rtf")):
             return True
         type_attr = attributes.get("type", "").lower()
         if any(marker in type_attr for marker in ("pdf", "msword", "wordprocessingml")):

@@ -24,7 +24,7 @@
             <p id="batchNameDisplay" class="inline-note" hidden></p>
 
             <label class="field">
-              <span>Instructions</span>
+              <span>Sample Instructions</span>
               <textarea id="instructions" rows="6" placeholder="Describe the target CSV columns and any extraction rules."></textarea>
             </label>
 
@@ -37,6 +37,11 @@
             <label class="field">
               <span>Source URLs</span>
               <textarea id="sourceUrls" rows="4" placeholder="One curriculum/document URL per line (https://...). Used instead of or alongside uploaded files."></textarea>
+            </label>
+
+            <label class="field">
+              <span>Programs to extract <span class="optional-tag">(optional)</span></span>
+              <textarea id="programFilter" rows="3" placeholder="When a source URL is an index page listing many programs, limit extraction to these. One term per line or comma-separated (program name or code, e.g. Automotive, 9514000). Leave blank to extract all."></textarea>
             </label>
 
             <label class="field file-field">
@@ -57,7 +62,7 @@
             <div class="workflow-card">
               <h3>Workflow</h3>
               <ol class="workflow-list">
-                <li>Upload source documents and write instructions.</li>
+                <li>Upload source documents and write sample instructions.</li>
                 <li>Generate a draft sample CSV.</li>
                 <li>Review or edit the sample CSV.</li>
                 <li>Approve and run extraction.</li>

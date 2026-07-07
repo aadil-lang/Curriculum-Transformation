@@ -95,6 +95,7 @@ class UiRequestHandler(BaseHTTPRequestHandler):
             raise ValueError("Instructions are required to generate a draft sample CSV.")
 
         source_urls = _parse_source_urls(payload.get("source_urls"))
+        program_filter = str(payload.get("program_filter", "")).strip() or None
         upload_names = [str(item.get("name", "")) for item in (payload.get("document_files") or [])]
         batch_name = _resolve_batch_name(
             payload.get("name"),
@@ -115,6 +116,7 @@ class UiRequestHandler(BaseHTTPRequestHandler):
                     input_files=[*(str(path) for path in document_files), *source_urls],
                     draft_only=True,
                     sample_row_target=_derive_requested_sample_row_target(instructions),
+                    program_filter=program_filter,
                 )
             ]
         )
@@ -126,6 +128,7 @@ class UiRequestHandler(BaseHTTPRequestHandler):
 
     def _handle_run_extraction(self, payload: dict[str, Any]) -> dict[str, Any]:
         instructions = str(payload.get("instructions", "")).strip()
+        program_filter = str(payload.get("program_filter", "")).strip() or None
         source_urls = _parse_source_urls(payload.get("source_urls"))
         sample_csv_content = str(payload.get("sample_csv_content", "")).strip()
         upload_names = [str(item.get("name", "")) for item in (payload.get("document_files") or [])]
@@ -162,6 +165,7 @@ class UiRequestHandler(BaseHTTPRequestHandler):
                     input_files=[*(str(path) for path in document_files), *source_urls],
                     sample_csv=str(sample_csv_path),
                     output_csv_name=str(payload.get("output_csv_name", "")).strip() or None,
+                    program_filter=program_filter,
                 )
             ]
         )

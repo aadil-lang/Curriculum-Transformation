@@ -111,6 +111,15 @@ class Settings:
     enable_region_targeting: bool = field(
         default_factory=lambda: os.getenv("ENABLE_REGION_TARGETING", "1").strip().lower() not in {"0", "false", "no", ""}
     )
+    enable_web_index_expansion: bool = field(
+        default_factory=lambda: os.getenv("ENABLE_WEB_INDEX_EXPANSION", "1").strip().lower() not in {"0", "false", "no", ""}
+    )
+    web_index_min_documents: int = field(
+        default_factory=lambda: max(2, int(os.getenv("WEB_INDEX_MIN_DOCUMENTS", "3")))
+    )
+    web_index_max_documents: int = field(
+        default_factory=lambda: max(0, int(os.getenv("WEB_INDEX_MAX_DOCUMENTS", "0")))
+    )
     schema_config_path: Path = field(
         default_factory=lambda: Path(os.getenv("SCHEMA_CONFIG_PATH", str(DEFAULT_SCHEMA_CONFIG_PATH)))
     )

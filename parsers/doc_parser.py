@@ -24,13 +24,19 @@ def _find_soffice() -> str:
         if Path(candidate).exists():
             return candidate
     raise RuntimeError(
-        "LibreOffice 'soffice' binary not found. Install LibreOffice to parse legacy .doc files "
+        "LibreOffice 'soffice' binary not found. Install LibreOffice to parse legacy .doc/.rtf files "
         "(e.g. 'brew install --cask libreoffice')."
     )
 
 
 def parse_doc(path: Path) -> ParsedDocument:
+    """Parse a legacy word-processing document (.doc or .rtf) via LibreOffice.
+
+    LibreOffice converts both formats to .docx identically, so this handles
+    Florida DOE-style .rtf curriculum frameworks as well as legacy .doc files.
+    """
     soffice = _find_soffice()
+    converted_from = path.suffix.lower().lstrip(".") or "doc"
     with tempfile.TemporaryDirectory(prefix="doc2docx-") as tmp_dir:
         result = subprocess.run(
             [soffice, "--headless", "--convert-to", "docx", "--outdir", tmp_dir, str(path)],
@@ -52,5 +58,5 @@ def parse_doc(path: Path) -> ParsedDocument:
         source_name=path.name,
         source_type="docx",
         markdown=parsed.markdown,
-        metadata={**parsed.metadata, "converted_from": "doc"},
+        metadata={**parsed.metadata, "converted_from": converted_from},
     )

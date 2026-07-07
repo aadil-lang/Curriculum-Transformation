@@ -284,6 +284,7 @@ def chat_batch_command(args: argparse.Namespace, settings: Settings) -> int:
             infer_schema=args.infer_schema,
             draft_only=args.draft_only,
             output_csv_name=args.output_csv_name,
+            program_filter=args.program_filter,
         )
 
     results = run_batches(request, settings)
@@ -390,6 +391,13 @@ def build_parser() -> argparse.ArgumentParser:
     chat_batch.add_argument("--infer-schema", action="store_true", help="Infer a draft schema when no sample CSV is provided.")
     chat_batch.add_argument("--draft-only", action="store_true", help="Only create schema/template outputs without extraction.")
     chat_batch.add_argument("--output-csv-name", help="Optional filename for the generated batch CSV.")
+    chat_batch.add_argument(
+        "--program-filter",
+        help=(
+            "Optional comma/newline-separated terms. When a source URL is an index page of many "
+            "downloadable documents, only programs whose name or code matches a term are extracted."
+        ),
+    )
     chat_batch.add_argument("files", nargs="*", help="Input document paths or document/website URLs for single-batch execution.")
     return parser
 

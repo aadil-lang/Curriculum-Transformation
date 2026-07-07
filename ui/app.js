@@ -25,6 +25,7 @@ const els = {
   instructions: document.getElementById("instructions"),
   documentFiles: document.getElementById("documentFiles"),
   sourceUrls: document.getElementById("sourceUrls"),
+  programFilter: document.getElementById("programFilter"),
   sampleCsvFile: document.getElementById("sampleCsvFile"),
   documentList: document.getElementById("documentList"),
   sampleCsvLabel: document.getElementById("sampleCsvLabel"),
@@ -79,7 +80,7 @@ els.sampleCsvFile.addEventListener("change", async (event) => {
 els.generateDraftButton.addEventListener("click", async () => {
   const instructions = els.instructions.value.trim();
   if (!instructions) {
-    setStatus("Instructions are required to draft a sample CSV.");
+    setStatus("Sample instructions are required to draft a sample CSV.");
     return;
   }
 
@@ -91,6 +92,7 @@ els.generateDraftButton.addEventListener("click", async () => {
         instructions,
         document_files: await encodeFiles(state.documents),
         source_urls: collectSourceUrls(),
+        program_filter: els.programFilter.value.trim(),
       });
       hydrateBatch(response.batch);
       setStatus(
@@ -191,6 +193,7 @@ async function runExtractionFromEditorOrUpload(triggerButton) {
         sample_csv_content: sampleCsvContent,
         document_files: await encodeFiles(state.documents),
         source_urls: collectSourceUrls(),
+        program_filter: els.programFilter.value.trim(),
       });
       hydrateBatch(response.batch);
       setStatus(
