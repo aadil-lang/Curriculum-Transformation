@@ -16,7 +16,7 @@ from batch_runner import CHAT_BATCH_OUTPUT_DIR, ChatBatchRequest, ChatBatchSpec,
 from config import DEFAULT_SCHEMA_CONFIG_PATH, INPUT_DIR, OUTPUT_DIR, ROOT_DIR, Settings, get_runtime_paths
 from csv_audit import audit_extracted_csv
 from csv_finalization import finalize_extracted_csv
-from schemas import load_schema_config
+from schemas import get_output_column_name, load_schema_config
 
 
 UI_DIR = ROOT_DIR / "ui"
@@ -476,6 +476,7 @@ def load_workspace_summary(settings: Settings) -> dict[str, Any]:
         "default_schema_name": schema.schema_name,
         "default_schema_path": str(DEFAULT_SCHEMA_CONFIG_PATH),
         "default_schema_field_count": len(schema.fields),
+        "default_schema_columns": [get_output_column_name(spec) for spec in schema.fields],
         "sample_contract_present": schema.sample_contract is not None,
         "batch_count": len(list_batch_summaries()),
         "input_document_count": len([path for path in INPUT_DIR.iterdir() if path.is_file()]) if INPUT_DIR.exists() else 0,

@@ -310,6 +310,26 @@ async function refreshWorkspace() {
   await loadBatchList();
 }
 
+async function seedBlankSampleTemplate() {
+  // On a fresh workspace (no batch loaded, empty editor), show a blank spreadsheet
+  // of the default schema's columns so the user can build a sample CSV inline.
+  if (state.currentBatch || state.showFinal || els.sampleCsvEditor.value.trim()) {
+    return;
+  }
+  try {
+    const workspace = await getJson("/api/workspace");
+    const columns = workspace.default_schema_columns || [];
+    if (!columns.length) {
+      return;
+    }
+    els.sampleCsvEditor.value = columns.map(escapeCsvCell).join(",") + "\n";
+    renderPreview();
+    updateButtonAvailability();
+  } catch (error) {
+    // Non-fatal: leave the empty-state message if the workspace call fails.
+  }
+}
+
 async function loadBatchList() {
   try {
     const payload = await getJson("/api/status");
@@ -1069,3 +1089,4 @@ renderResultSummary(null, "");
 renderPreview();
 updateButtonAvailability();
 refreshWorkspace();
+seedBlankSampleTemplate();
