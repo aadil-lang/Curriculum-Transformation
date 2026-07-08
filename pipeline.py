@@ -444,11 +444,16 @@ class DataTransformationPipeline:
             return
         if not any(result.status == "verified" for result in results):
             return
+        # The fix-loop already validates every row against the source, so the
+        # final full-CSV audit is a redundant second LLM pass by default. Skip it
+        # unless explicitly enabled; the clean deliverable is still written either
+        # way (the audit is advisory, not a gate on output).
         finalization_result = finalize_extracted_csv(
             self.runtime_paths.final_csv_path,
             self.settings,
             self.runtime_paths,
             sync_to_sheets=False,
+            audit_before_sync=self.settings.run_final_audit,
         )
         self.logger.info(
             "CSV finalization status=%s audit_passed=%s sync_status=%s message=%s",

@@ -126,6 +126,9 @@ class Settings:
     fix_loop_max_passes: int = field(
         default_factory=lambda: max(1, int(os.getenv("FIX_LOOP_MAX_PASSES", "2")))
     )
+    run_final_audit: bool = field(
+        default_factory=lambda: os.getenv("RUN_FINAL_AUDIT", "0").strip().lower() in {"1", "true", "yes", "on"}
+    )
     enable_region_targeting: bool = field(
         default_factory=lambda: os.getenv("ENABLE_REGION_TARGETING", "1").strip().lower() not in {"0", "false", "no", ""}
     )
