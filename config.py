@@ -121,7 +121,7 @@ class Settings:
         default_factory=lambda: os.getenv("EXTRACTION_CITATIONS", "1").strip().lower() not in {"0", "false", "no", "off", ""}
     )
     review_batch_size: int = field(
-        default_factory=lambda: max(1, int(os.getenv("REVIEW_BATCH_SIZE", "20")))
+        default_factory=lambda: max(1, int(os.getenv("REVIEW_BATCH_SIZE", "10")))
     )
     fix_loop_max_passes: int = field(
         default_factory=lambda: max(1, int(os.getenv("FIX_LOOP_MAX_PASSES", "2")))
