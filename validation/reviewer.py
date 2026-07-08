@@ -257,6 +257,25 @@ class TransformationReviewer:
                     f"Normalized topic '{topic_value}' to '{normalized_topic_value}'."
                 )
 
+        # Enforce sample-blank columns: a column the approved sample never fills
+        # must stay empty in output, even if the source has data for it (e.g. an
+        # l4/l5 hierarchy level the sample flattens away). Clear the value and its
+        # citation so extraction cannot introduce a column the contract omits.
+        contract = schema_config.sample_contract
+        if contract and contract.always_empty_columns:
+            for output_column in contract.always_empty_columns:
+                internal_name = output_to_internal.get(output_column.strip().lower())
+                if not internal_name:
+                    continue
+                if (data.get(internal_name) or "") != "" or (data.get(f"{internal_name}_source_citation") or "") != "":
+                    cleared_value = data.get(internal_name)
+                    data[internal_name] = None
+                    data[f"{internal_name}_source_citation"] = ""
+                    if cleared_value:
+                        fixes.append(
+                            f"Cleared '{output_column}' to honor the sample (column is blank in every sample row)."
+                        )
+
         return row_model.model_validate(data), fixes
 
     def _review_with_model(

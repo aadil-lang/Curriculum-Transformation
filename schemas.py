@@ -102,6 +102,10 @@ class SampleTransformationContract(BaseModel):
     noise_rejection_rules: list[str] = Field(default_factory=list)
     output_quality_rules: list[str] = Field(default_factory=list)
     sample_rows: list[dict[str, str]] = Field(default_factory=list)
+    # Output columns that are blank in every sample row. Enforced empty in output
+    # so the pipeline does not populate a column the approved sample never uses
+    # (e.g. an l4/l5 hierarchy level the sample flattens away).
+    always_empty_columns: list[str] = Field(default_factory=list)
 
 
 class TargetSchemaConfig(BaseModel):

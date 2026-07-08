@@ -1155,6 +1155,7 @@ def _derive_sample_contract(headers: list[str], rows: list[dict[str, str]]) -> S
 
     sample_rows = [{header: (row.get(header, "") or "").strip() for header in headers} for row in exemplar_rows]
     required_columns = _infer_required_columns(headers, non_empty_rows)
+    always_empty_columns = _infer_always_empty_columns(headers, non_empty_rows)
 
     contract = SampleTransformationContract(
         column_order=headers,
@@ -1176,8 +1177,26 @@ def _derive_sample_contract(headers: list[str], rows: list[dict[str, str]]) -> S
         noise_rejection_rules=_infer_noise_rejection_rules(headers),
         output_quality_rules=_infer_output_quality_rules(headers, exemplar_rows),
         sample_rows=sample_rows,
+        always_empty_columns=always_empty_columns,
     )
     return contract
+
+
+def _infer_always_empty_columns(headers: list[str], rows: list[dict[str, str]]) -> list[str]:
+    """Output columns blank in EVERY sample row — the sample never uses them.
+
+    Requires at least 2 sample rows: a single sparse sample row would wrongly
+    mark genuinely-used columns (e.g. topic/l3) as always-empty. With enough
+    rows, a column blank throughout is a deliberate contract choice (e.g. the
+    sample flattens an l4/l5 hierarchy it does not want populated).
+    """
+    if len(rows) < 2:
+        return []
+    return [
+        header
+        for header in headers
+        if not any((row.get(header, "") or "").strip() for row in rows)
+    ]
 
 
 def _infer_required_columns(headers: list[str], rows: list[dict[str, str]]) -> list[str]:
