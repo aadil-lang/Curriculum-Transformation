@@ -27,6 +27,19 @@ class TransformationReviewMetadata(BaseModel):
     confidence_notes: str = Field(default="", description="Short explanation of the review decision.")
 
 
+class EvaluateAndFixResult(BaseModel):
+    """Per-row outcome of the merged evaluate-and-fix call.
+
+    `remaining_issues` are defects the model could NOT resolve from the source
+    (i.e. reasons to reject/flag the row). An empty list means the row is valid
+    after any fixes it applied. This carries both the corrected row and the
+    verdict so a single LLM call replaces the separate reviewer + critic calls.
+    """
+    row: BaseModel
+    metadata: TransformationReviewMetadata
+    remaining_issues: list[str]
+
+
 class TransformationReviewer:
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or get_settings()
@@ -105,6 +118,91 @@ class TransformationReviewer:
                 confidence_notes=metadata.confidence_notes,
             )
             results.append((row_model.model_validate(corrected_row.model_dump()), merged_metadata))
+        return results
+
+    def evaluate_and_fix_batch(
+        self,
+        rows: list[BaseModel],
+        parsed_document: ParsedDocument,
+        planning: PreExtractionUnderstanding,
+        prior_issues: list[list[str]] | None = None,
+    ) -> list[EvaluateAndFixResult]:
+        """Fix AND evaluate a batch of rows in a single model call.
+
+        Merges what were two separate LLM stages (reviewer fix + critic verdict)
+        into one: the model corrects each row from the source and reports any
+        issues it could NOT resolve. Programmatic fixes still run locally first.
+        Returns one EvaluateAndFixResult per input row (row, metadata,
+        remaining_issues). Raises TransformationReviewError on a malformed/short
+        reply so the caller can fall back to the two-call path.
+        """
+        if not rows:
+            return []
+
+        row_model = rows[0].__class__
+        prepared = [self._apply_programmatic_fixes(row) for row in rows]
+        prepared_rows = [item[0] for item in prepared]
+        programmatic_fixes = [item[1] for item in prepared]
+
+        payload_model = get_extraction_payload_model(
+            str(self.settings.schema_config_path),
+            include_citations=self.settings.extraction_citations_enabled,
+        )
+        item_model = create_model(
+            "EvaluateFixItem",
+            __base__=BaseModel,
+            __module__=__name__,
+            row_index=(int, Field(description="Zero-based index of the row this result applies to.")),
+            review=(TransformationReviewMetadata, Field(description="Fixes applied and issues found for this row.")),
+            corrected_row=(payload_model, Field(description="The row after applying any supported fixes.")),
+            remaining_issues=(
+                list[str],
+                Field(
+                    default_factory=list,
+                    description=(
+                        "Concrete, demonstrable defects that could NOT be fixed from the source "
+                        "(reasons to reject this row). Empty when the row is valid after fixes."
+                    ),
+                ),
+            ),
+        )
+        response_model = create_model(
+            "EvaluateFixBatchEnvelope",
+            __base__=BaseModel,
+            __module__=__name__,
+            items=(list[item_model], Field(description="One result per input row, echoing its row_index.")),
+        )
+
+        messages = self._build_evaluate_and_fix_messages(prepared_rows, parsed_document, planning, prior_issues)
+        response = self._call_review_model(response_model, messages)
+
+        by_index: dict[int, Any] = {}
+        for item in response.items:
+            if 0 <= item.row_index < len(prepared_rows) and item.row_index not in by_index:
+                by_index[item.row_index] = item
+        if len(by_index) != len(prepared_rows):
+            raise TransformationReviewError(
+                f"Merged evaluate-and-fix covered {len(by_index)} of {len(prepared_rows)} rows."
+            )
+
+        results: list[EvaluateAndFixResult] = []
+        for index, original in enumerate(prepared_rows):
+            item = by_index[index]
+            metadata_fields = {field: getattr(original, field) for field in PIPELINE_METADATA_FIELDS}
+            corrected_row = row_model.model_validate({**metadata_fields, **item.corrected_row.model_dump()})
+            merged_metadata = TransformationReviewMetadata(
+                was_modified=bool(programmatic_fixes[index]) or item.review.was_modified,
+                issues_found=item.review.issues_found,
+                fixes_applied=[*programmatic_fixes[index], *item.review.fixes_applied],
+                confidence_notes=item.review.confidence_notes,
+            )
+            results.append(
+                EvaluateAndFixResult(
+                    row=corrected_row,
+                    metadata=merged_metadata,
+                    remaining_issues=[i for i in (item.remaining_issues or []) if i and i.strip()],
+                )
+            )
         return results
 
     def _apply_programmatic_fixes(self, row: BaseModel) -> tuple[BaseModel, list[str]]:
@@ -388,6 +486,101 @@ Output requirements:
 - review.issues_found should list all detected transformation problems for that row
 - review.fixes_applied should describe only the corrections you actually made to that row
 - corrected_row must be the final row to send to the final critic
+
+Original document markdown:
+{parsed_document.markdown}
+""".strip()
+
+        return [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+
+    def _build_evaluate_and_fix_messages(
+        self,
+        rows: list[BaseModel],
+        parsed_document: ParsedDocument,
+        planning: PreExtractionUnderstanding,
+        prior_issues: list[list[str]] | None = None,
+    ) -> list[dict[str, str]]:
+        schema_config = load_schema_config(settings=self.settings)
+        schema_json = json.dumps(schema_config.model_dump(mode="json"), indent=2)
+        sample_contract_json = (
+            json.dumps(schema_config.sample_contract.model_dump(mode="json"), indent=2)
+            if schema_config.sample_contract
+            else "null"
+        )
+        planning_json = json.dumps(planning.model_dump(mode="json"), indent=2)
+        rows_json = json.dumps(
+            [
+                {
+                    "row_index": index,
+                    "row": schema_only_row_view(row),
+                    **(
+                        {"must_fix_issues": prior_issues[index]}
+                        if prior_issues and index < len(prior_issues) and prior_issues[index]
+                        else {}
+                    ),
+                }
+                for index, row in enumerate(rows)
+            ],
+            indent=2,
+        )
+
+        system_prompt = (
+            "You are a transformation evaluator-and-fixer. In ONE step you both fix each extracted "
+            "CSV row against the source and decide whether it is valid. "
+            "Apply only minimal, source-supported fixes; do not invent facts. "
+            "Preserve citations, symbols, multilingual content, multiline structure, and row boundaries. "
+            "Infer subject-specific column meaning from the sample contract and source; do not hardcode "
+            "one hierarchy across subjects. grade_level must be exactly one of: Elementary School, "
+            "Middle School, High School. "
+            "Review each row INDEPENDENTLY; do not merge, drop, or reorder rows, and return exactly one "
+            "item per input row echoing its row_index. "
+            "For each row, put in corrected_row your best source-faithful version, and in "
+            "remaining_issues ONLY concrete, demonstrable defects you could NOT fix from the source "
+            "(reasons the row should be rejected). If the row is good after your fixes, remaining_issues "
+            "must be empty. Default to keeping rows: transformation, mapping, inheritance, and synthesis "
+            "are expected and correct, not defects. Do not reject on speculation or vague doubt. "
+            "Return your response as a single JSON object."
+        )
+
+        user_prompt = f"""
+Schema:
+{schema_json}
+
+Sample CSV transformation contract:
+{sample_contract_json}
+
+Pre-extraction understanding artifact:
+{planning_json}
+
+Rows to evaluate and fix (each has a row_index):
+{rows_json}
+
+Fix goals (apply to EACH row from the source):
+- make subject, domain, topic, grade_level, display_grade, grade_number/grade_string, and source follow the sample-derived column semantics for this subject
+- populate document-level and section-level inherited fields (e.g. subject, domain, topic, l3) on EVERY row from the plan's column derivations, even when they are not printed next to each benchmark
+- normalize grade_level to exactly Elementary School, Middle School, or High School when the source supports it
+- if grade_number/grade_string is a numeric range like `9-12`, expand to `9,10,11,12` (no spaces after commas)
+- if the sample supports merged topic cells and one standard spans multiple topics, merge topic names with ` | ` rather than duplicating rows
+- follow the sample's display standard code style (source-faithful or synthetic/derived); keep it unique, adding a short domain/topic prefix with a dot when the same raw code repeats
+- preserve description completeness, notation, bullet/punctuation style, and multiline behavior required by the sample
+- if a row carries `must_fix_issues`, those are defects a prior pass found: fix EACH from the source and do not reintroduce them
+
+Reject a row (list it in remaining_issues) ONLY for concrete problems:
+- a required column is genuinely absent from the source and cannot be derived
+- a value is copied from the wrong place (neighboring-row contamination) or is document noise (headers, footers, page numbers, nav links)
+- a description is truncated mid-sentence or drops required sub-parts
+- loss/garbling of math, chemistry, Greek, or multilingual characters the source clearly contains
+- grade_level is not one of the three allowed values
+- a value plainly contradicts the sample contract
+
+Output requirements:
+- return one item per input row in `items`, each with the matching row_index
+- corrected_row = the final, fixed row
+- review.was_modified true only if you changed the row; review.fixes_applied lists only real corrections
+- remaining_issues = ONLY unfixable, concrete defects (empty if the row is valid)
 
 Original document markdown:
 {parsed_document.markdown}

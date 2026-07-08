@@ -275,28 +275,62 @@ class DataTransformationPipeline:
                     updates["source_source_citation"] = canonical_source
             return row.model_copy(update=updates) if updates else row
 
-        def review_batch(built: list[BaseModel], prior_issues: list[list[str]] | None) -> list[tuple[BaseModel, Any]]:
-            if hasattr(self.reviewer, "review_and_fix_batch"):
-                return self.reviewer.review_and_fix_batch(built, parsed_document, planning, prior_issues)
-            return [self.reviewer.review_and_fix(row, parsed_document, planning) for row in built]
-
-        def evaluate_batch(reviewed_rows: list[BaseModel]) -> list[Any]:
-            if hasattr(self.critic, "validate_batch"):
-                return self.critic.validate_batch(reviewed_rows, parsed_document)
-            verdicts: list[Any] = []
-            for row in reviewed_rows:
-                try:
-                    verdicts.append(self.critic.validate(row, parsed_document))
-                except Exception as exc:  # noqa: BLE001 - treated as this row's issue below
-                    verdicts.append(exc)
-            return verdicts
-
         def verdict_issues(verdict: Any) -> list[str]:
             if isinstance(verdict, Exception):
                 return [str(verdict)]
             if getattr(verdict, "tag", "") != "VALID" or not getattr(verdict, "is_valid", False):
                 return list(getattr(verdict, "issues", None) or [getattr(verdict, "confidence_notes", "") or "Row rejected by evaluator."])
             return []
+
+        def preflight_issues(row: BaseModel) -> list[str]:
+            # Deterministic, local gate (required-field/noise/grade checks). Runs
+            # before the LLM call so blank required fields are caught for free.
+            preflight = getattr(self.critic, "_run_contract_preflight", None)
+            if preflight is None:
+                return []
+            try:
+                preflight(row)
+            except Exception as exc:  # noqa: BLE001 - a preflight failure is this row's issue
+                return [str(exc)]
+            return []
+
+        def evaluate_and_fix(built: list[BaseModel], prior_issues: list[list[str]] | None) -> list[tuple[BaseModel, Any, list[str]]]:
+            """One merged call per batch: fix + verdict. Falls back to the
+            separate reviewer/critic calls for engines without the merged method."""
+            if hasattr(self.reviewer, "evaluate_and_fix_batch"):
+                try:
+                    merged = self.reviewer.evaluate_and_fix_batch(built, parsed_document, planning, prior_issues)
+                    out: list[tuple[BaseModel, Any, list[str]]] = []
+                    for result in merged:
+                        # Combine the model's remaining issues with the deterministic preflight.
+                        issues = list(result.remaining_issues) + preflight_issues(result.row)
+                        out.append((result.row, result.metadata, issues))
+                    return out
+                except Exception as exc:  # noqa: BLE001 - fall back to the two-call path
+                    LOGGER.warning(
+                        "Merged evaluate-and-fix failed (%s); falling back to separate review+critic for %d rows.",
+                        type(exc).__name__,
+                        len(built),
+                    )
+            # Fallback: reviewer fixes, critic validates (two calls).
+            if hasattr(self.reviewer, "review_and_fix_batch"):
+                reviewed = self.reviewer.review_and_fix_batch(built, parsed_document, planning, prior_issues)
+            else:
+                reviewed = [self.reviewer.review_and_fix(row, parsed_document, planning) for row in built]
+            reviewed_rows = [row for row, _ in reviewed]
+            if hasattr(self.critic, "validate_batch"):
+                verdicts = self.critic.validate_batch(reviewed_rows, parsed_document)
+            else:
+                verdicts = []
+                for row in reviewed_rows:
+                    try:
+                        verdicts.append(self.critic.validate(row, parsed_document))
+                    except Exception as exc:  # noqa: BLE001
+                        verdicts.append(exc)
+            return [
+                (row, review_metadata, verdict_issues(verdict))
+                for (row, review_metadata), verdict in zip(reviewed, verdicts)
+            ]
 
         def handle_batch(batch: list[BaseModel]) -> tuple[list[tuple[BaseModel, Any]], list[dict[str, Any]]]:
             # Track each row by its position in the batch across fix passes.
@@ -307,15 +341,12 @@ class DataTransformationPipeline:
 
             for pass_number in range(self.settings.fix_loop_max_passes):
                 issues_arg = prior_issues if any(prior_issues) else None
-                reviewed = review_batch(active_rows, issues_arg)
-                reviewed_rows = [row for row, _ in reviewed]
-                verdicts = evaluate_batch(reviewed_rows)
+                evaluated = evaluate_and_fix(active_rows, issues_arg)
 
                 next_rows: list[BaseModel] = []
                 next_prior: list[list[str]] = []
                 next_index_map: list[int] = []
-                for pos, ((row, review_metadata), verdict) in enumerate(zip(reviewed, verdicts)):
-                    issues = verdict_issues(verdict)
+                for pos, (row, review_metadata, issues) in enumerate(evaluated):
                     if not issues:
                         passed[index_map[pos]] = (stamp_source(row), review_metadata)
                     else:

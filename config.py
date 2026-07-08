@@ -103,7 +103,7 @@ class Settings:
         default_factory=lambda: max(1, int(os.getenv("ROW_MAX_WORKERS", "6")))
     )
     llm_max_concurrency: int = field(
-        default_factory=lambda: max(1, int(os.getenv("LLM_MAX_CONCURRENCY", "12")))
+        default_factory=lambda: max(1, int(os.getenv("LLM_MAX_CONCURRENCY", "4")))
     )
     extraction_max_chars_per_chunk: int = field(
         default_factory=lambda: max(4000, int(os.getenv("EXTRACTION_MAX_CHARS_PER_CHUNK", "15000")))
@@ -121,7 +121,7 @@ class Settings:
         default_factory=lambda: os.getenv("EXTRACTION_CITATIONS", "1").strip().lower() not in {"0", "false", "no", "off", ""}
     )
     review_batch_size: int = field(
-        default_factory=lambda: max(1, int(os.getenv("REVIEW_BATCH_SIZE", "10")))
+        default_factory=lambda: max(1, int(os.getenv("REVIEW_BATCH_SIZE", "20")))
     )
     fix_loop_max_passes: int = field(
         default_factory=lambda: max(1, int(os.getenv("FIX_LOOP_MAX_PASSES", "2")))
