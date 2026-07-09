@@ -9,6 +9,7 @@ Document-to-CSV extraction agent for curriculum and standards sources. The agent
 - extracts rows from PDFs, DOCX files, webpages, and source-link manifests
 - preserves hierarchy, multiline descriptions, symbols, and multilingual text
 - validates rows before append using review and critic stages
+- can run a fast Claude Map-Reduce extractor that chunks documents, maps chunks in parallel with strict tool-use JSON, and merges rows deterministically
 - audits extracted CSVs against their sources
 - syncs approved sample CSVs or final extracted CSVs to Google Sheets only when explicitly requested
 
@@ -26,7 +27,11 @@ The agent is designed to follow this sequence:
 
 - `main.py`: CLI entrypoint
 - `chat_batches.py`: sample/schema drafting and batch orchestration
-- `pipeline.py`: extraction, review, critic validation, and final CSV append
+- `pipeline.py`: legacy guarded extraction, review, critic validation, and final CSV append
+- `extractor.py`: legacy planning plus chunk extraction stage
+- `validation/reviewer.py`: legacy transformation review and fix loop
+- `validation/critic.py`: legacy semantic critic gate
+- `claude_map_reduce.py`: high-performance Claude Map-Reduce extraction path
 - `csv_audit.py`: extracted CSV auditing
 - `google_sheets_sync.py`: Google Sheets delivery
 - `schema_config.json`: default workspace schema
@@ -97,6 +102,11 @@ Common fields:
 - `CRITIC_MODEL`
 - `EXECUTION_MODE`
 - `SCHEMA_CONFIG_PATH`
+- `CLAUDE_MAP_REDUCE_MODEL`
+- `CLAUDE_MAP_REDUCE_CHUNK_WORDS`
+- `CLAUDE_MAP_REDUCE_OVERLAP_WORDS`
+- `CLAUDE_MAP_REDUCE_CONCURRENCY`
+- `CLAUDE_MAP_REDUCE_MAX_TOKENS`
 
 Supported execution modes:
 
@@ -260,6 +270,29 @@ Run multiple subjects in one config file:
 ```bash
 python main.py chat-batch --config /absolute/path/to/chat_batch_request.json
 ```
+
+## Fast Claude Map-Reduce Extraction
+
+Use this path when you want to replace the legacy planning -> extraction -> review -> critic loop with one parallel map phase and deterministic reduce phase.
+
+```bash
+python main.py run-map-reduce \
+  --sample-csv /absolute/path/to/approved-sample.csv \
+  --output-csv output/claude_map_reduce_extracted_data.csv \
+  /absolute/path/to/source.pdf
+```
+
+If you omit input files, the command processes every supported document staged in `input_documents/`.
+
+This path is implemented in `claude_map_reduce.py`:
+
+- parses each PDF/DOCX/web reference using the existing parser layer
+- slices text into about 4,000-word chunks by default
+- sends all chunks for a document to Claude in parallel using Anthropic tool use
+- requires a strict Pydantic-backed tool payload instead of model-written CSV text
+- injects approved sample CSV rows as the Golden Reference for inferred taxonomy, display-grade, and code formatting
+- merges and deduplicates rows in Python without an LLM reduce call
+- writes chunk artifacts under `output/claude_map_reduce/` and the final CSV at `output/claude_map_reduce_extracted_data.csv` unless overridden
 
 ## CSV Audit
 
