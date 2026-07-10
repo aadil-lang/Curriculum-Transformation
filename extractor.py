@@ -443,6 +443,51 @@ def _build_variation_slice(
     return separator.join(pieces), matched, skipped
 
 
+def build_review_doc_slice(
+    markdown: str,
+    row_views: list[dict[str, Any]],
+    *,
+    anchor_fields: tuple[str, ...] = ("description", "topic", "domain"),
+    window_chars: int = 1500,
+    budget_chars: int = 24000,
+) -> str:
+    """A bounded source excerpt for reviewing/critiquing a batch of rows.
+
+    Review and critic re-send the ENTIRE document on every batch call, which on a
+    large source is the dominant token cost (the doc is ~unchanged across dozens of
+    Opus calls). Instead, anchor on the batch's own field values (each row's
+    description etc. is verbatim-ish source text) and send only the windows of the
+    document around where those values appear.
+
+    Returns the stitched slice, or the FULL markdown when it is already small
+    (<= budget) or no anchor matched — never sacrificing QC grounding to save tokens
+    on a document that is cheap anyway or that we could not locate the rows in.
+    """
+    if not markdown:
+        return markdown
+    if len(markdown) <= budget_chars:
+        return markdown
+
+    anchors: list[str] = []
+    for view in row_views:
+        for field in anchor_fields:
+            value = str(view.get(field, "") or "").strip()
+            if len(value) >= 12:
+                # A leading chunk is enough to locate the row in the source and is
+                # more likely to string-match than the full (possibly transformed) value.
+                anchors.append(value[:120])
+                break
+
+    slice_text, matched, _ = _build_variation_slice(
+        markdown, anchors, window_chars=window_chars, budget_chars=budget_chars
+    )
+    if matched == 0 or not slice_text.strip():
+        # Could not locate any row in the source — fall back to the full document so
+        # review/critic keep full grounding rather than judging blind.
+        return markdown
+    return slice_text
+
+
 def _is_output_truncation_error(exc: Exception) -> bool:
     markers = ("incompleteoutput", "max_tokens", "length limit", "finish_reason", "output is incomplete")
     text = f"{type(exc).__name__} {exc}".lower()
@@ -527,6 +572,27 @@ class ExtractionEngine:
         parsed_document = self._apply_region_targeting(parsed_document, region_override)
 
         planning = self._analyze_document(parsed_document, prior_error_log)
+
+        # Deterministic coverage ground-truth: the source's own row markers (benchmark
+        # codes, numbered items) are counted by regex — exact where the LLM analysis
+        # under-counts. When markers are found we OVERRIDE the model's coverage fields so
+        # the count no longer depends on the model; otherwise the LLM estimate stands.
+        from coverage import detect_row_anchors
+
+        detection = detect_row_anchors(parsed_document.markdown)
+        if detection.has_markers:
+            planning.expected_total_rows = detection.expected_total_rows
+            if not planning.section_inventory:
+                planning.section_inventory = detection.section_inventory
+            LOGGER.info(
+                "Coverage: detected %d row markers (%s) — using as extraction target.",
+                detection.expected_total_rows,
+                detection.pattern_name,
+            )
+        else:
+            LOGGER.info("Coverage: no deterministic row markers; relying on LLM estimate (%s).",
+                        planning.expected_total_rows or "none")
+
         citations_enabled = self.settings.extraction_citations_enabled
         payload_description = (
             "All final structured extraction rows with verbatim citations, in source order."
@@ -591,12 +657,73 @@ class ExtractionEngine:
             payload_rows.extend(rows)
             anchoring_plan.update(plan)
 
+        # Missing-anchor recovery: for a coded source, any detected marker with no
+        # corresponding extracted row was silently skipped. Re-extract just the source
+        # windows around those markers (one bounded call) so coverage can't quietly fall
+        # short. Best-effort — recovered rows are appended; still-missing ones are
+        # reported via the coverage check downstream.
+        if detection.has_markers:
+            payload_rows = self._recover_missing_anchors(
+                parsed_document, planning, prior_error_log, envelope_model, detection, payload_rows
+            )
+
         return ExtractionAttempt(
             planning=planning,
             payload_rows=payload_rows,
             layout_analysis=planning.layout_analysis,
             anchoring_plan=anchoring_plan,
         )
+
+    def _recover_missing_anchors(
+        self,
+        parsed_document: ParsedDocument,
+        planning: PreExtractionUnderstanding,
+        prior_error_log: str | None,
+        envelope_model: type[BaseModel],
+        detection: Any,
+        payload_rows: list[BaseModel],
+    ) -> list[BaseModel]:
+        """Re-extract source windows for detected markers that produced no row."""
+        # Which detected codes already appear in an extracted row's values?
+        extracted_blob = "\n".join(
+            " ".join(str(v) for v in row.model_dump().values() if v) for row in payload_rows
+        )
+        missing = [a for a in detection.anchors if a.code not in extracted_blob]
+        if not missing:
+            LOGGER.info("Coverage: all %d detected markers extracted.", len(detection.anchors))
+            return payload_rows
+
+        LOGGER.info(
+            "Coverage: %d of %d markers missing after first pass; re-extracting their source windows.",
+            len(missing),
+            len(detection.anchors),
+        )
+        budget = self.settings.extraction_max_chars_per_chunk
+        slice_text, matched, _ = _build_variation_slice(
+            parsed_document.markdown,
+            [a.code for a in missing],
+            window_chars=max(1200, budget // max(1, len(missing))),
+            budget_chars=budget,
+        )
+        if matched == 0 or not slice_text.strip():
+            return payload_rows
+
+        chunk_note = (
+            "RECOVERY PASS: the following source excerpts contain benchmark rows that were "
+            "MISSED in the first extraction. Extract EVERY benchmark present here — do not skip "
+            "any. Emit one output row per benchmark code shown."
+        )
+        try:
+            recovered_rows, _ = self._extract_chunk_rows(
+                parsed_document, planning, prior_error_log, envelope_model, slice_text, chunk_note=chunk_note
+            )
+        except ExtractionOutputTooLargeError:
+            LOGGER.info("Coverage recovery slice overflowed; keeping first-pass rows.")
+            return payload_rows
+        if recovered_rows:
+            LOGGER.info("Coverage: recovered %d additional row(s).", len(recovered_rows))
+            payload_rows.extend(recovered_rows)
+        return payload_rows
 
     def draft_sample_rows(
         self,
@@ -803,11 +930,13 @@ Document outline:
         prior_error_log: str | None,
         envelope_model: type[BaseModel],
         chunk: str,
+        chunk_note: str | None = None,
     ) -> tuple[list[BaseModel], dict[str, str]]:
-        chunk_note = (
-            "This is one part of a larger source document. "
-            "Extract only rows supported by THIS part; other parts are handled separately."
-        )
+        if chunk_note is None:
+            chunk_note = (
+                "This is one part of a larger source document. "
+                "Extract only rows supported by THIS part; other parts are handled separately."
+            )
         messages = self._build_extraction_messages(
             parsed_document, planning, prior_error_log, markdown_override=chunk, chunk_note=chunk_note
         )

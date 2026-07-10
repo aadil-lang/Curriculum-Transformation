@@ -84,6 +84,14 @@ class UiRequestHandler(BaseHTTPRequestHandler):
                 response = self._handle_audit_batch(payload)
                 self._send_json(response)
                 return
+            if parsed.path == "/api/review-csv":
+                response = handle_review_csv(self.server.settings, payload)
+                self._send_json(response)
+                return
+            if parsed.path == "/api/fix-reviewed-csv":
+                response = handle_fix_reviewed_csv(self.server.settings, payload)
+                self._send_json(response)
+                return
             if parsed.path == "/api/sync-batch":
                 response = self._handle_sync_batch(payload)
                 self._send_json(response)
@@ -275,6 +283,233 @@ def handle_audit_batch(settings: Settings, payload: dict[str, Any]) -> dict[str,
             "issue_count": result.issue_count,
         },
         "batch": load_batch_detail(batch_name),
+    }
+
+
+def handle_review_csv(settings: Settings, payload: dict[str, Any]) -> dict[str, Any]:
+    """Audit an externally-produced CSV against ONE supplied source doc or URL.
+
+    Independent of the extraction batches: the caller uploads a CSV plus a source
+    (uploaded PDF/docx OR a URL). Every row is audited against that single document,
+    with the CSV's own header defining the contract (no missing-column noise).
+    """
+    import json as _json
+    import tempfile
+
+    csv_payload = payload.get("csv_file") or {}
+    csv_content = str(payload.get("csv_content", "") or "")
+    source_files = payload.get("source_files") or []
+    source_urls = _parse_source_urls(payload.get("source_urls"))
+    review_instructions = str(payload.get("review_instructions", "") or "").strip() or None
+
+    if not (csv_payload or csv_content.strip()):
+        raise ValueError("Upload a CSV to review.")
+    if not source_files and not source_urls:
+        raise ValueError("Provide a source document (upload) or a source URL to review against.")
+
+    work_dir = Path(tempfile.mkdtemp(prefix="review-csv-", dir=str(OUTPUT_DIR / "csv_audits")))
+    work_dir.mkdir(parents=True, exist_ok=True)
+
+    # Materialize the CSV.
+    if csv_payload:
+        csv_path = _persist_uploaded_file(csv_payload, work_dir)
+    else:
+        csv_path = work_dir / "review_input.csv"
+        csv_path.write_text(csv_content, encoding="utf-8")
+
+    # Materialize the ONE source: uploaded file wins, else fetch the first URL.
+    if source_files:
+        source_path = _persist_uploaded_file(source_files[0], work_dir)
+    else:
+        from batch_runner import _materialize_manifest_source
+
+        source_path = _materialize_manifest_source(
+            reference=source_urls[0], destination_dir=work_dir, default_stub="review_source"
+        )
+
+    runtime_paths = get_runtime_paths(ROOT_DIR)
+    result = audit_extracted_csv(
+        csv_path,
+        settings,
+        runtime_paths=runtime_paths,
+        source_document_path=source_path,
+        user_instructions=review_instructions,
+    )
+    findings = _json.loads(Path(result.report_path).read_text(encoding="utf-8")) if Path(result.report_path).exists() else []
+    return {
+        "review": {
+            "rows_audited": result.rows_audited,
+            "issue_count": result.issue_count,
+            "report_path": result.report_path,
+            "source": source_files[0].get("name") if source_files else source_urls[0],
+            "findings": findings,
+        }
+    }
+
+
+def handle_fix_reviewed_csv(settings: Settings, payload: dict[str, Any]) -> dict[str, Any]:
+    """Fix a reviewed external CSV against its source, driven by the USER's approved set.
+
+    The reviewer is fallible on an externally-produced CSV (it may flag valid rows or
+    miss real ones), so the human is the authority: the client sends `approved_findings`
+    — the findings the user kept, plus any they added manually — as
+    ``[{"row_number": N, "issue": "..."}]``. Only those rows are fixed, with their
+    approved issues passed to the reviewer as the things to address. Free-text
+    ``suggestions`` still apply CSV-wide.
+    """
+    import csv as _csv
+    import io
+    import tempfile
+    from datetime import datetime, timezone
+
+    from batch_runner import create_model_settings, create_schema_from_sample_csv
+    from parsers.router import parse_input
+    from schemas import get_target_row_model, get_schema_fields
+    from extractor import PreExtractionUnderstanding
+    from validation.reviewer import TransformationReviewer
+
+    csv_payload = payload.get("csv_file") or {}
+    csv_content = str(payload.get("csv_content", "") or "")
+    source_files = payload.get("source_files") or []
+    source_urls = _parse_source_urls(payload.get("source_urls"))
+    user_suggestions = str(payload.get("suggestions", "") or "").strip()
+    approved_findings = payload.get("approved_findings") or []
+    if not (csv_payload or csv_content.strip()):
+        raise ValueError("Upload a CSV to fix.")
+    if not source_files and not source_urls:
+        raise ValueError("Provide the source document or URL to fix against.")
+
+    work_dir = Path(tempfile.mkdtemp(prefix="fix-csv-", dir=str(OUTPUT_DIR / "csv_audits")))
+    if csv_payload:
+        csv_path = _persist_uploaded_file(csv_payload, work_dir)
+    else:
+        csv_path = work_dir / "fix_input.csv"
+        csv_path.write_text(csv_content, encoding="utf-8")
+
+    if source_files:
+        source_path = _persist_uploaded_file(source_files[0], work_dir)
+    else:
+        from batch_runner import _materialize_manifest_source
+
+        source_path = _materialize_manifest_source(
+            reference=source_urls[0], destination_dir=work_dir, default_stub="fix_source"
+        )
+
+    runtime_paths = get_runtime_paths(ROOT_DIR)
+
+    # 1. Group the USER-approved findings by CSV row number (1-based line, header=1).
+    #    These are the human's decisions — kept reviewer findings + manually added ones —
+    #    NOT a fresh audit. This lets the user drop false positives and add misses.
+    issues_by_row: dict[int, list[str]] = {}
+    for finding in approved_findings:
+        try:
+            rn = int(finding.get("row_number"))
+        except (TypeError, ValueError):
+            continue
+        issue_text = str(finding.get("issue") or "").strip()
+        if issue_text:
+            issues_by_row.setdefault(rn, []).append(issue_text)
+
+    # 2. Contract + row model from the CSV's own header.
+    schema_config = create_schema_from_sample_csv(csv_path, "fix_csv")
+    schema_path = work_dir / "schema_config.json"
+    schema_path.write_text(json.dumps(schema_config.model_dump(mode="json"), indent=2), encoding="utf-8")
+    fix_settings = create_model_settings(settings, schema_path)
+    row_model = get_target_row_model(str(schema_path), include_citations=fix_settings.extraction_citations_enabled)
+    schema_fields = get_schema_fields(str(schema_path))
+    col_to_field = {(spec.output_column or spec.name): spec.name for spec in schema_fields}
+
+    parsed_document = parse_input(source_path)
+
+    with csv_path.open(newline="", encoding="utf-8-sig") as handle:
+        reader = _csv.DictReader(handle)
+        original_fieldnames = reader.fieldnames or []
+        all_rows = list(reader)
+
+    if not issues_by_row and not user_suggestions:
+        return {
+            "fix": {
+                "fixed_count": 0,
+                "corrected_csv": csv_path.read_text(encoding="utf-8"),
+                "corrected_name": (csv_payload.get("name") if csv_payload else "reviewed.csv"),
+                "message": "No approved findings and no suggestions to apply.",
+            }
+        }
+
+    def build_row(raw_row: dict) -> BaseModel:
+        data = {
+            "source_document": parsed_document.source_name,
+            "source_type": parsed_document.source_type,
+            "source_identifier": parsed_document.document_id,
+            "processed_at_utc": datetime.now(timezone.utc).isoformat(),
+        }
+        for column, value in raw_row.items():
+            field = col_to_field.get(column)
+            if field:
+                data[field] = value or ""
+        return row_model.model_validate(data)
+
+    # 3. Select rows to fix (row_number is CSV line number: header is line 1, so
+    #    data row index i (0-based) is line i+2). Rows with an APPROVED finding always;
+    #    ALL rows when the user supplied CSV-wide suggestions.
+    if user_suggestions:
+        target_indices = list(range(len(all_rows)))
+    else:
+        target_indices = [i for i in range(len(all_rows)) if (i + 2) in issues_by_row]
+    flagged_indices = target_indices
+    flagged_rows = [build_row(all_rows[i]) for i in flagged_indices]
+    suggestion_note = (
+        f"User-requested improvement to apply where supported by the source: {user_suggestions}"
+        if user_suggestions
+        else ""
+    )
+    prior_issues = [
+        ([*issues_by_row.get(i + 2, []), suggestion_note] if suggestion_note else issues_by_row.get(i + 2, []))
+        for i in flagged_indices
+    ]
+
+    reviewer = TransformationReviewer(fix_settings)
+    results = reviewer.evaluate_and_fix_batch(
+        flagged_rows, parsed_document, PreExtractionUnderstanding(), prior_issues
+    )
+
+    # 4. Merge corrected field values back into the original CSV rows (by output column).
+    fixed_count = 0
+    for local_pos, result in enumerate(results):
+        corrected = result.row.model_dump()
+        raw_index = flagged_indices[local_pos]
+        changed = False
+        for column in original_fieldnames:
+            field = col_to_field.get(column)
+            if field and field in corrected and corrected[field] is not None:
+                new_value = str(corrected[field])
+                if new_value != (all_rows[raw_index].get(column) or ""):
+                    all_rows[raw_index][column] = new_value
+                    changed = True
+        if changed:
+            fixed_count += 1
+
+    # 5. Write corrected CSV preserving the original column order.
+    buffer = io.StringIO()
+    writer = _csv.DictWriter(buffer, fieldnames=original_fieldnames)
+    writer.writeheader()
+    for row in all_rows:
+        writer.writerow({col: row.get(col, "") for col in original_fieldnames})
+    corrected_csv = buffer.getvalue()
+
+    corrected_name = (csv_payload.get("name") if csv_payload else "reviewed.csv") or "reviewed.csv"
+    if corrected_name.lower().endswith(".csv"):
+        corrected_name = corrected_name[:-4]
+    corrected_name = f"{corrected_name}.fixed.csv"
+
+    return {
+        "fix": {
+            "fixed_count": fixed_count,
+            "flagged_count": len(flagged_indices),
+            "corrected_csv": corrected_csv,
+            "corrected_name": corrected_name,
+            "message": f"Fixed {fixed_count} of {len(flagged_indices)} flagged row(s) against {parsed_document.source_name}.",
+        }
     }
 
 

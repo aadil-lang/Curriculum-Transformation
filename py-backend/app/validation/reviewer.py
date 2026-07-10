@@ -7,7 +7,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field, create_model
 
-from extractor import PreExtractionUnderstanding
+from extractor import PreExtractionUnderstanding, build_review_doc_slice
 from config import Settings, get_settings
 from parsers.base import ParsedDocument
 from schemas import PIPELINE_METADATA_FIELDS, get_extraction_payload_model, load_schema_config, normalize_grade_level, schema_only_row_view
@@ -126,6 +126,7 @@ class TransformationReviewer:
         parsed_document: ParsedDocument,
         planning: PreExtractionUnderstanding,
         prior_issues: list[list[str]] | None = None,
+        doc_slice: str | None = None,
     ) -> list[EvaluateAndFixResult]:
         """Fix AND evaluate a batch of rows in a single model call.
 
@@ -173,7 +174,9 @@ class TransformationReviewer:
             items=(list[item_model], Field(description="One result per input row, echoing its row_index.")),
         )
 
-        messages = self._build_evaluate_and_fix_messages(prepared_rows, parsed_document, planning, prior_issues)
+        messages = self._build_evaluate_and_fix_messages(
+            prepared_rows, parsed_document, planning, prior_issues, doc_slice=doc_slice
+        )
         response = self._call_review_model(response_model, messages)
 
         by_index: dict[int, Any] = {}
@@ -374,7 +377,9 @@ class TransformationReviewer:
             else "null"
         )
         planning_json = json.dumps(planning.model_dump(mode="json"), indent=2)
-        row_json = json.dumps(schema_only_row_view(row), indent=2)
+        row_view = schema_only_row_view(row)
+        row_json = json.dumps(row_view, indent=2)
+        doc_slice = build_review_doc_slice(parsed_document.markdown, [row_view])
 
         system_prompt = (
             "You are a transformation evaluator and fixer. "
@@ -421,8 +426,8 @@ Output requirements:
 - review.fixes_applied should describe only the corrections you actually made
 - corrected_row must be the final row to send to the final critic
 
-Original document markdown:
-{parsed_document.markdown}
+Relevant source excerpts (the regions of the document where these rows' content appears; use them to verify and fix):
+{doc_slice}
 """.strip()
 
         return [
@@ -445,11 +450,13 @@ Original document markdown:
             else "null"
         )
         planning_json = json.dumps(planning.model_dump(mode="json"), indent=2)
+        row_views = [schema_only_row_view(row) for row in rows]
+        doc_slice = build_review_doc_slice(parsed_document.markdown, row_views)
         rows_json = json.dumps(
             [
                 {
                     "row_index": index,
-                    "row": schema_only_row_view(row),
+                    "row": view,
                     # Specific defects the evaluator flagged last pass; fix these first.
                     **(
                         {"must_fix_issues": prior_issues[index]}
@@ -457,7 +464,7 @@ Original document markdown:
                         else {}
                     ),
                 }
-                for index, row in enumerate(rows)
+                for index, view in enumerate(row_views)
             ],
             indent=2,
         )
@@ -511,8 +518,8 @@ Output requirements:
 - review.fixes_applied should describe only the corrections you actually made to that row
 - corrected_row must be the final row to send to the final critic
 
-Original document markdown:
-{parsed_document.markdown}
+Relevant source excerpts (the regions of the document where these rows' content appears; use them to verify and fix):
+{doc_slice}
 """.strip()
 
         return [
@@ -526,6 +533,7 @@ Original document markdown:
         parsed_document: ParsedDocument,
         planning: PreExtractionUnderstanding,
         prior_issues: list[list[str]] | None = None,
+        doc_slice: str | None = None,
     ) -> list[dict[str, str]]:
         schema_config = load_schema_config(settings=self.settings)
         schema_json = json.dumps(schema_config.model_dump(mode="json"), indent=2)
@@ -535,18 +543,24 @@ Original document markdown:
             else "null"
         )
         planning_json = json.dumps(planning.model_dump(mode="json"), indent=2)
+        row_views = [schema_only_row_view(row) for row in rows]
+        # Use the precomputed document-level slice when the caller supplied one (so all
+        # batches of a source share the same doc-wide region); otherwise compute from
+        # this batch's rows.
+        if doc_slice is None:
+            doc_slice = build_review_doc_slice(parsed_document.markdown, row_views)
         rows_json = json.dumps(
             [
                 {
                     "row_index": index,
-                    "row": schema_only_row_view(row),
+                    "row": view,
                     **(
                         {"must_fix_issues": prior_issues[index]}
                         if prior_issues and index < len(prior_issues) and prior_issues[index]
                         else {}
                     ),
                 }
-                for index, row in enumerate(rows)
+                for index, view in enumerate(row_views)
             ],
             indent=2,
         )
@@ -606,8 +620,8 @@ Output requirements:
 - review.was_modified true only if you changed the row; review.fixes_applied lists only real corrections
 - remaining_issues = ONLY unfixable, concrete defects (empty if the row is valid)
 
-Original document markdown:
-{parsed_document.markdown}
+Relevant source excerpts (the regions of the document where these rows' content appears; use them to verify and fix):
+{doc_slice}
 """.strip()
 
         return [

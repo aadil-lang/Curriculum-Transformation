@@ -163,23 +163,30 @@ class DataTransformationPipeline:
                 if not extraction.payload_rows:
                     raise RuntimeError("Extractor returned no rows for this source.")
                 
-                # Check coverage against expected_total_rows
+                # Coverage check. With a deterministic target (row markers counted from
+                # the source) this is ground truth; otherwise it is the LLM's estimate.
+                # Never silently skip: a MISSING target is itself logged, so an
+                # unverifiable run is visible rather than passing as "verified".
+                extracted_count = len(extraction.payload_rows)
                 expected_total = getattr(extraction.planning, "expected_total_rows", None)
                 if expected_total and expected_total > 0:
-                    extracted_count = len(extraction.payload_rows)
                     coverage_pct = (extracted_count / expected_total) * 100
-                    if coverage_pct < 50:
+                    coverage_status = f"{extracted_count}/{expected_total} rows ({coverage_pct:.0f}%)"
+                    if coverage_pct < 90:
                         self.logger.warning(
-                            "LOW COVERAGE: Extracted only %d rows (%.1f%%) of expected %d rows. "
-                            "The model may not be extracting exhaustively. Consider increasing max_tokens or "
-                            "splitting the document into smaller chunks.",
-                            extracted_count, coverage_pct, expected_total
+                            "LOW COVERAGE: extracted %d of %d expected rows (%.1f%%). Some source "
+                            "rows may be missing from this extraction.",
+                            extracted_count, expected_total, coverage_pct,
                         )
                     else:
-                        self.logger.info(
-                            "Coverage check: Extracted %d rows (%.1f%%) of expected %d rows.",
-                            extracted_count, coverage_pct, expected_total
-                        )
+                        self.logger.info("Coverage: %s.", coverage_status)
+                else:
+                    coverage_status = f"{extracted_count} rows (target unverified)"
+                    self.logger.warning(
+                        "COVERAGE UNVERIFIED: no row-count target was established (no source markers "
+                        "and no LLM estimate), so extraction completeness for %s cannot be checked.",
+                        parsed_document.source_name,
+                    )
 
                 validated_rows, review_metadata_by_row, failed_rows = self._review_and_validate_rows(
                     extraction.payload_rows, parsed_document, extraction.planning, row_model
@@ -198,7 +205,7 @@ class DataTransformationPipeline:
                 if failed_rows:
                     self._log_failed_rows_manual_review(path, parsed_document, failed_rows)
                 self._mark_processed(path, "verified", error_log_history, retryable=False)
-                message = f"Reviewed, validated, and appended {len(all_rows)} row(s) to CSV."
+                message = f"Reviewed, validated, and appended {len(all_rows)} row(s) to CSV. Coverage: {coverage_status}."
                 if failed_rows:
                     message += f" {len(failed_rows)} row(s) flagged NEEDS_REVIEW."
                 return ProcessResult(
@@ -296,6 +303,16 @@ class DataTransformationPipeline:
                     updates["source_source_citation"] = canonical_source
             return row.model_copy(update=updates) if updates else row
 
+        # Precompute ONE document-level review slice from ALL rows of this source, so
+        # every batch reviews against the same document-wide region rather than each
+        # batch recomputing its own windows. All rows here share one parsed_document
+        # (extraction is per-file), so this is the whole relevant document for the set.
+        from extractor import build_review_doc_slice
+        from schemas import schema_only_row_view
+
+        all_row_views = [schema_only_row_view(build_row(payload)) for payload in payload_rows]
+        doc_review_slice = build_review_doc_slice(parsed_document.markdown, all_row_views)
+
         def verdict_issues(verdict: Any) -> list[str]:
             if isinstance(verdict, Exception):
                 return [str(verdict)]
@@ -320,7 +337,9 @@ class DataTransformationPipeline:
             separate reviewer/critic calls for engines without the merged method."""
             if hasattr(self.reviewer, "evaluate_and_fix_batch"):
                 try:
-                    merged = self.reviewer.evaluate_and_fix_batch(built, parsed_document, planning, prior_issues)
+                    merged = self.reviewer.evaluate_and_fix_batch(
+                        built, parsed_document, planning, prior_issues, doc_slice=doc_review_slice
+                    )
                     out: list[tuple[BaseModel, Any, list[str]]] = []
                     for result in merged:
                         # Combine the model's remaining issues with the deterministic preflight.

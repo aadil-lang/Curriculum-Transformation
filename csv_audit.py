@@ -85,22 +85,51 @@ class CsvBatchAuditVerdict(BaseModel):
     confidence_notes: str = ""
 
 
+class ReconciledFinding(BaseModel):
+    index: int = Field(description="Zero-based index of the finding in the provided list.")
+    suppress: bool = Field(default=False, description="True if the user's instructions make this finding acceptable/not-an-issue.")
+    reason: str = Field(default="", description="Short reason it is suppressed, quoting the relevant user instruction.")
+
+
+class ReconciliationVerdict(BaseModel):
+    decisions: list[ReconciledFinding] = Field(default_factory=list)
+
+
 def audit_extracted_csv(
     audit_csv_path: Path,
     settings: Settings,
     sample_csv_path: Path | None = None,
     runtime_paths: RuntimePaths | None = None,
+    source_document_path: Path | None = None,
+    user_instructions: str | None = None,
 ) -> CsvAuditResult:
+    """Audit a CSV row-by-row against its source document(s).
+
+    By default each row is grouped by its own ``source`` column value and audited
+    against the document that value points to. When ``source_document_path`` is given
+    (an externally-produced CSV reviewed against ONE supplied doc), the source column
+    is ignored and EVERY row is audited against that single parsed document.
+
+    ``user_instructions`` is optional free-text guidance the reviewer must honor for
+    THIS audit (e.g. "this CSV intentionally omits grade columns — do not flag that",
+    or "focus on description accuracy"). It shapes what the model flags.
+    """
     audit_csv_path = audit_csv_path.expanduser().resolve()
     active_runtime_paths = runtime_paths or get_runtime_paths(ROOT_DIR)
     report_dir = active_runtime_paths.output_dir / "csv_audits"
     report_dir.mkdir(parents=True, exist_ok=True)
 
     active_settings = settings
-    if sample_csv_path is not None:
+    # Contract source, in priority order:
+    #  1. an explicit sample CSV, if provided;
+    #  2. otherwise, for an external single-doc audit, the audited CSV's OWN header
+    #     (so its actual columns define the contract — no "missing column" noise from
+    #     a mismatch against the default workspace schema).
+    contract_csv = sample_csv_path or (audit_csv_path if source_document_path is not None else None)
+    if contract_csv is not None:
         from batch_runner import create_model_settings, create_schema_from_sample_csv
 
-        schema_config = create_schema_from_sample_csv(sample_csv_path.expanduser().resolve(), "csv_audit")
+        schema_config = create_schema_from_sample_csv(Path(contract_csv).expanduser().resolve(), "csv_audit")
         schema_path = report_dir / f"{audit_csv_path.stem}.schema_config.json"
         schema_path.write_text(json.dumps(schema_config.model_dump(mode="json"), indent=2), encoding="utf-8")
         active_settings = create_model_settings(settings, schema_path)
@@ -114,22 +143,29 @@ def audit_extracted_csv(
     display_standard_code_rows: dict[str, list[int]] = {}
     display_standard_code_column = _get_display_standard_code_column(schema_config)
 
+    single_source_override = source_document_path.expanduser().resolve() if source_document_path else None
+
     with audit_csv_path.open(newline="", encoding="utf-8-sig") as handle:
         reader = csv.DictReader(handle)
         for row_number, raw_row in enumerate(reader, start=2):
             rows_audited += 1
-            source_reference = (raw_row.get("source") or "").strip()
-            if not source_reference:
-                issues = [
-                    CsvAuditIssue(
-                        column_name="source",
-                        issue_type="missing_source",
-                        issue_message="Row does not contain a usable source reference.",
-                    )
-                ]
-                report_rows.extend(_render_report_rows(row_number, source_reference, issues, "INVALID"))
-                issue_count += len(issues)
-                continue
+            if single_source_override is not None:
+                # External-CSV mode: audit every row against the one supplied doc,
+                # regardless of any source column.
+                source_reference = str(single_source_override)
+            else:
+                source_reference = (raw_row.get("source") or "").strip()
+                if not source_reference:
+                    issues = [
+                        CsvAuditIssue(
+                            column_name="source",
+                            issue_type="missing_source",
+                            issue_message="Row does not contain a usable source reference.",
+                        )
+                    ]
+                    report_rows.extend(_render_report_rows(row_number, source_reference, issues, "INVALID"))
+                    issue_count += len(issues)
+                    continue
             if display_standard_code_column:
                 display_code = (raw_row.get(display_standard_code_column) or "").strip()
                 if display_code:
@@ -159,7 +195,7 @@ def audit_extracted_csv(
             continue
 
         for row_chunk in _chunk_rows(grouped_rows, size=12):
-            batch_verdict = _audit_rows_with_model(row_chunk, parsed_document, schema_config, active_settings)
+            batch_verdict = _audit_rows_with_model(row_chunk, parsed_document, schema_config, active_settings, user_instructions)
             finding_map = {finding.row_number: finding for finding in batch_verdict.findings}
 
             for row_number, raw_row in row_chunk:
@@ -184,6 +220,13 @@ def audit_extracted_csv(
                     issue_count += len(combined_issues)
                     final_tag = "INVALID" if model_tag == "INVALID" or combined_issues else "VALID"
                     report_rows.extend(_render_report_rows(row_number, source_reference, combined_issues, final_tag))
+
+    # Reconciliation guarantee: let user instructions override ANY finding (including
+    # programmatic ones the audit model never sees). Suppressed findings stay in the
+    # report (dimmed in the UI) but do not count as issues.
+    if user_instructions and user_instructions.strip():
+        _reconcile_findings_with_instructions(report_rows, user_instructions, active_settings)
+    issue_count = sum(1 for row in report_rows if not row.get("suppressed"))
 
     report_path = report_dir / f"{audit_csv_path.stem}.audit_report.json"
     report_path.write_text(json.dumps(report_rows, indent=2), encoding="utf-8")
@@ -284,8 +327,9 @@ def _audit_rows_with_model(
     parsed_document: Any,
     schema_config: Any,
     settings: Settings,
+    user_instructions: str | None = None,
 ) -> CsvBatchAuditVerdict:
-    messages = _build_batch_audit_messages(row_chunk, parsed_document, schema_config)
+    messages = _build_batch_audit_messages(row_chunk, parsed_document, schema_config, user_instructions)
 
     if settings.portkey_api_key:
         return _call_portkey_json(CsvBatchAuditVerdict, messages, settings)
@@ -344,6 +388,7 @@ def _build_batch_audit_messages(
     row_chunk: list[tuple[int, dict[str, str]]],
     parsed_document: Any,
     schema_config: Any,
+    user_instructions: str | None = None,
 ) -> list[dict[str, str]]:
     rows_json = json.dumps(
         [
@@ -364,10 +409,17 @@ def _build_batch_audit_messages(
         ]
     contract_json = json.dumps(audit_contract.model_dump(mode="json"), indent=2) if audit_contract else "null"
 
+    instructions_block = (
+        f"\nUSER REVIEW INSTRUCTIONS (highest priority — follow these for this audit; if they say a "
+        f"particular pattern is acceptable or out of scope, do NOT flag it):\n{user_instructions.strip()}\n"
+        if user_instructions and user_instructions.strip()
+        else ""
+    )
+
     prompt = f"""
 Audit these extracted CSV rows against the original source document and the approved sample contract.
 Return exactly one finding for every input row_number.
-
+{instructions_block}
 {_AUDIT_RULES}
 
 Sample CSV transformation contract:
@@ -492,6 +544,72 @@ def _load_source_document(source_reference: str, runtime_paths: Any, cache: dict
         raise
     cache[source_reference] = parsed_document
     return parsed_document
+
+
+def _reconcile_findings_with_instructions(
+    report_rows: list[dict[str, Any]],
+    user_instructions: str,
+    settings: Settings,
+) -> None:
+    """Mark findings the user's instructions declare acceptable as suppressed.
+
+    A single cheap LLM call (findings + instructions only — no source doc) judges each
+    finding against the user's free-text guidance. This is the guarantee layer that lets
+    instructions override ANY finding, including deterministic/programmatic ones (e.g.
+    duplicate display codes, missing columns) the audit model never sees. Mutates
+    report_rows in place, adding ``suppressed`` and ``suppressed_reason``. Best-effort:
+    on any failure, nothing is suppressed (findings stand).
+    """
+    if not report_rows or not user_instructions.strip():
+        return
+
+    listing = json.dumps(
+        [
+            {
+                "index": i,
+                "row_number": r.get("row_number"),
+                "issue_type": r.get("issue_type"),
+                "column_name": r.get("column_name"),
+                "issue_message": r.get("issue_message"),
+            }
+            for i, r in enumerate(report_rows)
+        ],
+        indent=2,
+    )
+    system_prompt = (
+        "You reconcile automated CSV-review findings against a user's explicit review "
+        "instructions. The user knows their data's intended conventions; their instructions "
+        "OVERRIDE the findings. For each finding, decide whether the user's instructions make "
+        "it acceptable (not a real issue for THIS CSV). Suppress a finding ONLY when an "
+        "instruction clearly covers it (e.g. 'duplicate display codes are allowed', "
+        "'topics are intentionally merged', 'do not flag missing grade columns'). When in "
+        "doubt, do NOT suppress. Return one decision per finding index. Respond as JSON."
+    )
+    user_prompt = (
+        f"User review instructions:\n{user_instructions.strip()}\n\n"
+        f"Findings (suppress the ones the instructions make acceptable):\n{listing}"
+    )
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
+    try:
+        if settings.portkey_api_key:
+            verdict = _call_portkey_json(ReconciliationVerdict, messages, settings)
+        elif settings.critic_provider == "openai":
+            verdict = _call_openai_json(ReconciliationVerdict, messages, settings)
+        elif settings.critic_provider == "anthropic":
+            verdict = _call_anthropic_json(ReconciliationVerdict, messages, settings)
+        else:
+            return
+    except Exception as exc:  # noqa: BLE001 - suppression is best-effort; findings stand on failure
+        LOGGER.warning("Finding reconciliation failed (%s); no findings suppressed.", exc)
+        return
+
+    for decision in getattr(verdict, "decisions", []) or []:
+        if 0 <= decision.index < len(report_rows) and decision.suppress:
+            report_rows[decision.index]["suppressed"] = True
+            report_rows[decision.index]["suppressed_reason"] = decision.reason or "Suppressed by your review instruction."
 
 
 def _render_report_rows(

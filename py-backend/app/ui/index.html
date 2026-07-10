@@ -16,9 +16,16 @@
         <div class="layout-top">
           <section class="panel panel-form">
             <div class="section-head">
-              <h2>New Extraction</h2>
+              <h2 id="formPanelTitle">New Extraction</h2>
               <span id="batchBadge" class="badge">Idle</span>
             </div>
+
+            <div class="tab-bar" role="tablist">
+              <button id="tabExtraction" class="tab-button active" role="tab" aria-selected="true">Extraction</button>
+              <button id="tabReview" class="tab-button" role="tab" aria-selected="false">Review</button>
+            </div>
+
+            <div id="extractionTab" class="tab-pane">
 
             <p id="batchNameDisplay" class="inline-note" hidden></p>
 
@@ -68,6 +75,54 @@
             <p class="hint">
               If you do not provide a sample CSV, the app creates one first and waits for your approval before extraction.
             </p>
+            </div>
+
+            <div id="reviewTab" class="tab-pane" hidden>
+              <div class="workflow-card workflow-card-top">
+                <h3>Review an existing CSV</h3>
+                <p class="inline-note">Upload a CSV and its source document (file or URL). Each row is checked against the source; the CSV's own columns define the contract.</p>
+              </div>
+
+              <label class="field file-field">
+                <span>CSV to review</span>
+                <input id="reviewCsvFile" type="file" accept=".csv">
+              </label>
+              <div id="reviewCsvLabel" class="inline-note">No CSV selected yet.</div>
+
+              <label class="field file-field">
+                <span>Source document</span>
+                <input id="reviewSourceFile" type="file" accept=".pdf,.docx,.doc">
+              </label>
+              <div id="reviewSourceLabel" class="inline-note">No source document selected yet.</div>
+
+              <label class="field">
+                <span>— or source URL —</span>
+                <textarea id="reviewSourceUrl" rows="2" placeholder="One source document/page URL (https://...). Used if no source file is uploaded."></textarea>
+              </label>
+
+              <label class="field">
+                <span>Instructions before review <span class="optional-tag">(optional)</span></span>
+                <textarea id="reviewInstructions" rows="2" placeholder="Optional: guidance for the reviewer itself (e.g. 'this CSV intentionally omits grade columns, don't flag that', 'focus on description accuracy'). Shapes what gets flagged."></textarea>
+              </label>
+
+              <div class="button-row">
+                <button id="reviewCsvButton" class="primary">Review against source</button>
+              </div>
+
+              <label class="field">
+                <span>Suggested improvements <span class="optional-tag">(optional)</span></span>
+                <textarea id="reviewSuggestions" rows="2" placeholder="Optional: changes to apply to the CSV when fixing (e.g. 'expand grade ranges', 'strip unit prefixes from Topic'). Applied where the source supports it."></textarea>
+              </label>
+
+              <div id="reviewSummary" class="result-summary">No review yet. Upload a CSV and source to check it.</div>
+              <div id="reviewFindings" class="review-findings"></div>
+
+              <div id="reviewFixRow" class="button-row" hidden>
+                <button id="approveFixButton" class="accent">Approve &amp; fix flagged rows</button>
+                <button id="downloadFixedButton" class="ghost" hidden>Download Fixed CSV</button>
+              </div>
+              <div id="reviewFixSummary" class="result-summary" hidden></div>
+            </div>
           </section>
 
           <section class="panel panel-preview">

@@ -822,3 +822,131 @@ pre {
 .action-status:empty {
   display: none;
 }
+
+/* Form-panel tabs (Extraction / Review) */
+.tab-bar {
+  display: flex;
+  gap: 6px;
+  margin: 4px 0 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+.tab-button {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-weight: 600;
+  padding: 8px 14px;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+}
+
+.tab-button:hover {
+  color: var(--text);
+}
+
+.tab-button.active {
+  color: var(--accent-strong);
+  border-bottom-color: var(--accent);
+}
+
+.review-findings {
+  margin-top: 12px;
+}
+
+.finding-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.finding-item {
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: var(--panel-strong);
+}
+
+.finding-head {
+  font-weight: 600;
+  font-size: 0.9em;
+  margin-bottom: 4px;
+}
+
+.finding-type {
+  color: var(--accent-strong);
+  font-weight: 500;
+  font-size: 0.85em;
+}
+
+.finding-msg {
+  color: var(--muted);
+  font-size: 0.9em;
+  line-height: 1.4;
+  display: block;
+}
+
+.finding-check {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  cursor: pointer;
+}
+
+.finding-check input[type="checkbox"] {
+  margin-top: 3px;
+  flex-shrink: 0;
+}
+
+.finding-body {
+  display: block;
+}
+
+.manual-finding {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--line);
+}
+
+.manual-finding-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 6px;
+  align-items: center;
+}
+
+.manual-row-input {
+  width: 80px;
+  flex-shrink: 0;
+}
+
+.manual-issue-input {
+  flex: 1;
+}
+
+.manual-finding-row input {
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font: inherit;
+}
+
+.finding-item.suppressed {
+  opacity: 0.55;
+  border-left-color: var(--muted);
+}
+
+.finding-suppressed {
+  display: block;
+  margin-top: 4px;
+  font-size: 0.82em;
+  font-style: italic;
+  color: var(--muted);
+}

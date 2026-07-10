@@ -135,6 +135,14 @@ def _create_app() -> FastAPI:
     async def sync_batch(request: Request) -> JSONResponse:
         return _run(ui_server.handle_sync_batch, await request.json())
 
+    @app.post(f"{BASE_PREFIX}/api/review-csv")
+    async def review_csv(request: Request) -> JSONResponse:
+        return _run(ui_server.handle_review_csv, await request.json())
+
+    @app.post(f"{BASE_PREFIX}/api/fix-reviewed-csv")
+    async def fix_reviewed_csv(request: Request) -> JSONResponse:
+        return _run(ui_server.handle_fix_reviewed_csv, await request.json())
+
     LOGGER.info("FastAPI app initialized. Base prefix: %s", BASE_PREFIX)
     return app
 

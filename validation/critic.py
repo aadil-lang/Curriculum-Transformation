@@ -7,7 +7,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
-from extractor import _normalize_to_string_list
+from extractor import _normalize_to_string_list, build_review_doc_slice
 from config import Settings, get_settings
 from parsers.base import ParsedDocument
 from schemas import ALLOWED_GRADE_LEVELS, TargetSchemaConfig, critic_row_view, get_output_column_name, load_schema_config
@@ -213,10 +213,9 @@ class ExtractionCritic:
     def _build_audit_messages(self, row: BaseModel, parsed_document: ParsedDocument) -> list[dict[str, str]]:
         schema_config = load_schema_config(settings=self.settings)
         include_citations = self.settings.extraction_citations_enabled
-        row_json = json.dumps(
-            critic_row_view(row, schema_config, include_citations=include_citations),
-            indent=2,
-        )
+        row_view = critic_row_view(row, schema_config, include_citations=include_citations)
+        row_json = json.dumps(row_view, indent=2)
+        doc_slice = build_review_doc_slice(parsed_document.markdown, [row_view])
         sample_contract_json = (
             json.dumps(schema_config.sample_contract.model_dump(mode="json"), indent=2)
             if schema_config.sample_contract
@@ -249,8 +248,8 @@ Sample CSV transformation contract:
 Extracted row:
 {row_json}
 
-Original document markdown:
-{parsed_document.markdown}
+Relevant source excerpts (the regions of the document where this row's content appears):
+{doc_slice}
 """.strip()
 
         return [
@@ -272,13 +271,15 @@ Original document markdown:
     ) -> list[dict[str, str]]:
         schema_config = load_schema_config(settings=self.settings)
         include_citations = self.settings.extraction_citations_enabled
+        row_views = [
+            critic_row_view(row, schema_config, include_citations=include_citations)
+            for row in rows
+        ]
+        doc_slice = build_review_doc_slice(parsed_document.markdown, row_views)
         rows_json = json.dumps(
             [
-                {
-                    "row_index": index,
-                    "row": critic_row_view(row, schema_config, include_citations=include_citations),
-                }
-                for index, row in enumerate(rows)
+                {"row_index": index, "row": view}
+                for index, view in enumerate(row_views)
             ],
             indent=2,
         )
@@ -315,8 +316,8 @@ Sample CSV transformation contract:
 Extracted rows to audit (each has a row_index):
 {rows_json}
 
-Original document markdown:
-{parsed_document.markdown}
+Relevant source excerpts (the regions of the document where these rows' content appears):
+{doc_slice}
 """.strip()
 
         return [
