@@ -29,27 +29,17 @@
 
             <p id="batchNameDisplay" class="inline-note" hidden></p>
 
-            <div class="workflow-card workflow-card-top">
-              <h3>Workflow</h3>
-              <ol class="workflow-list">
-                <li>Upload source documents (sample instructions optional).</li>
-                <li>Generate a draft sample CSV.</li>
-                <li>Review or edit the sample CSV.</li>
-                <li>Approve and run extraction.</li>
-                <li>Audit and optionally sync from the batch actions panel.</li>
-              </ol>
-            </div>
-
-            <label class="field">
-              <span>Sample Instructions <em>(optional)</em></span>
-              <textarea id="instructions" rows="4" placeholder="Optional: describe the target CSV columns or any extraction rules. Leave blank to use the default schema."></textarea>
-            </label>
-
             <label class="field file-field">
               <span>Source documents</span>
               <input id="documentFiles" type="file" multiple accept=".pdf,.docx,.doc">
             </label>
             <div id="documentList" class="chip-list"></div>
+
+            <label class="field file-field">
+              <span>Sample CSV <span class="optional-tag">(optional)</span></span>
+              <input id="sampleCsvFile" type="file" accept=".csv">
+            </label>
+            <div id="sampleCsvLabel" class="inline-note">No sample CSV selected yet.</div>
 
             <label class="field">
               <span>Source URLs</span>
@@ -57,18 +47,18 @@
             </label>
 
             <label class="field">
+              <span>Sample Instructions <em>(optional)</em></span>
+              <textarea id="instructions" rows="4" placeholder="Optional: describe the target CSV columns or any extraction rules. Leave blank to use the default schema."></textarea>
+            </label>
+
+            <label class="field">
               <span>Programs to extract <span class="optional-tag">(optional)</span></span>
               <textarea id="programFilter" rows="2" placeholder="When a source URL is an index page listing many programs, limit extraction to these. One term per line or comma-separated (program name or code, e.g. Automotive, 9514000). Leave blank to extract all."></textarea>
             </label>
 
-            <label class="field file-field">
-              <span>Optional sample CSV</span>
-              <input id="sampleCsvFile" type="file" accept=".csv">
-            </label>
-            <div id="sampleCsvLabel" class="inline-note">No sample CSV selected yet.</div>
-
             <div class="button-row">
               <button id="generateDraftButton" class="primary">Generate Draft Sample CSV</button>
+              <button id="approveDraftButton" class="accent" hidden>Approve Draft</button>
               <button id="runExtractionButton">Run Extraction</button>
             </div>
 
@@ -78,27 +68,37 @@
             </div>
 
             <div id="reviewTab" class="tab-pane" hidden>
-              <div class="workflow-card workflow-card-top">
-                <h3>Review an existing CSV</h3>
-                <p class="inline-note">Upload a CSV and its source document (file or URL). Each row is checked against the source; the CSV's own columns define the contract.</p>
+              <div class="review-mode-toggle" role="tablist">
+                <button id="reviewModeBatch" class="tab-button active" role="tab" aria-selected="true">In-app csv</button>
+                <button id="reviewModeExternal" class="tab-button" role="tab" aria-selected="false">External CSV</button>
               </div>
 
-              <label class="field file-field">
-                <span>CSV to review</span>
-                <input id="reviewCsvFile" type="file" accept=".csv">
-              </label>
-              <div id="reviewCsvLabel" class="inline-note">No CSV selected yet.</div>
+              <div id="reviewBatchMode">
+                <label class="field">
+                  <span>Extracted subject</span>
+                  <select id="reviewBatchSelect" class="select-input"><option value="">Loading…</option></select>
+                </label>
+                <div class="inline-note">Reviewed against the source(s) this app recorded during extraction — no upload needed.</div>
+              </div>
 
-              <label class="field file-field">
-                <span>Source document</span>
-                <input id="reviewSourceFile" type="file" accept=".pdf,.docx,.doc">
-              </label>
-              <div id="reviewSourceLabel" class="inline-note">No source document selected yet.</div>
+              <div id="reviewExternalMode" hidden>
+                <label class="field file-field">
+                  <span>CSV to review</span>
+                  <input id="reviewCsvFile" type="file" accept=".csv">
+                </label>
+                <div id="reviewCsvLabel" class="inline-note">No CSV selected yet.</div>
 
-              <label class="field">
-                <span>— or source URL —</span>
-                <textarea id="reviewSourceUrl" rows="2" placeholder="One source document/page URL (https://...). Used if no source file is uploaded."></textarea>
-              </label>
+                <label class="field file-field">
+                  <span>Source document</span>
+                  <input id="reviewSourceFile" type="file" accept=".pdf,.docx,.doc">
+                </label>
+                <div id="reviewSourceLabel" class="inline-note">No source document selected yet.</div>
+
+                <label class="field">
+                  <span>— or source URL —</span>
+                  <textarea id="reviewSourceUrl" rows="2" placeholder="One source document/page URL (https://...). Used if no source file is uploaded."></textarea>
+                </label>
+              </div>
 
               <label class="field">
                 <span>Instructions before review <span class="optional-tag">(optional)</span></span>
@@ -146,15 +146,12 @@
                 <div id="samplePreviewTableWrap" class="sheet-grid empty-state">No sample preview yet.</div>
               </div>
             </div>
-            <div id="sampleActions" class="button-row preview-action-row">
-              <button id="downloadSampleButton" class="ghost" disabled>Download Sample CSV</button>
-              <button id="syncSampleButton" class="ghost" disabled>Sync Sample to Sheets</button>
-              <button id="approveRunButton" class="accent" disabled>Approve Draft and Run Extraction</button>
-            </div>
-            <div id="resultActions" class="button-row preview-action-row" hidden>
-              <button id="downloadFinalButton" class="accent" disabled>Download Extracted CSV</button>
-              <button id="auditBatchButton" class="secondary" disabled>Audit Extracted CSV</button>
-              <button id="syncFinalButton" class="secondary" disabled>Sync Final to Sheets</button>
+            <label class="field sheet-link-field">
+              <span>Google Sheet link <span class="optional-tag">(for sync)</span></span>
+              <input id="sheetLinkInput" type="text" placeholder="Paste a Google Sheet link or ID. Stays linked until you change it.">
+            </label>
+            <div class="button-row preview-action-row">
+              <button id="syncFinalButton" class="accent" disabled>Sync to Sheets</button>
             </div>
             <div id="resultSummary" class="result-summary">No results yet. Run an extraction to see output here.</div>
             <div id="actionBox" class="action-status"></div>

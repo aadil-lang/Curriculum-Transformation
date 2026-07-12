@@ -39,21 +39,16 @@ const els = {
   schemaPathBox: document.getElementById("schemaPathBox"),
   samplePathBox: document.getElementById("samplePathBox"),
   resultSummary: document.getElementById("resultSummary"),
-  sampleActions: document.getElementById("sampleActions"),
-  resultActions: document.getElementById("resultActions"),
   previewHeading: document.getElementById("previewHeading"),
   previewPill: document.getElementById("previewPill"),
-  downloadFinalButton: document.getElementById("downloadFinalButton"),
   actionBox: document.getElementById("actionBox"),
   batchList: document.getElementById("batchList"),
   batchBadge: document.getElementById("batchBadge"),
   generateDraftButton: document.getElementById("generateDraftButton"),
   runExtractionButton: document.getElementById("runExtractionButton"),
-  downloadSampleButton: document.getElementById("downloadSampleButton"),
-  approveRunButton: document.getElementById("approveRunButton"),
-  auditBatchButton: document.getElementById("auditBatchButton"),
+  approveDraftButton: document.getElementById("approveDraftButton"),
   syncFinalButton: document.getElementById("syncFinalButton"),
-  syncSampleButton: document.getElementById("syncSampleButton"),
+  sheetLinkInput: document.getElementById("sheetLinkInput"),
   reloadBatchesButton: document.getElementById("reloadBatchesButton"),
   formPanelTitle: document.getElementById("formPanelTitle"),
   tabExtraction: document.getElementById("tabExtraction"),
@@ -65,6 +60,11 @@ const els = {
   reviewSourceFile: document.getElementById("reviewSourceFile"),
   reviewSourceLabel: document.getElementById("reviewSourceLabel"),
   reviewSourceUrl: document.getElementById("reviewSourceUrl"),
+  reviewModeBatch: document.getElementById("reviewModeBatch"),
+  reviewModeExternal: document.getElementById("reviewModeExternal"),
+  reviewBatchMode: document.getElementById("reviewBatchMode"),
+  reviewExternalMode: document.getElementById("reviewExternalMode"),
+  reviewBatchSelect: document.getElementById("reviewBatchSelect"),
   reviewCsvButton: document.getElementById("reviewCsvButton"),
   reviewInstructions: document.getElementById("reviewInstructions"),
   reviewSuggestions: document.getElementById("reviewSuggestions"),
@@ -76,7 +76,7 @@ const els = {
   reviewFixSummary: document.getElementById("reviewFixSummary"),
 };
 
-const reviewState = { csvFile: null, sourceFile: null, csvText: "", findings: [], correctedCsv: "", correctedName: "" };
+const reviewState = { mode: "batch", csvFile: null, sourceFile: null, csvText: "", findings: [], correctedCsv: "", correctedName: "", batchesLoaded: false };
 
 els.documentFiles.addEventListener("change", async (event) => {
   state.documents = Array.from(event.target.files || []);
@@ -136,55 +136,33 @@ els.runExtractionButton.addEventListener("click", async () => {
   await runExtractionFromEditorOrUpload(els.runExtractionButton);
 });
 
-els.downloadSampleButton.addEventListener("click", async () => {
-  try {
-    await runButtonAction(els.downloadSampleButton, async () => {
-      downloadCurrentSampleCsv();
-    });
-  } catch (error) {
-    setStatus(error.message);
-  }
-});
-
-els.approveRunButton.addEventListener("click", async () => {
-  await runExtractionFromEditorOrUpload(els.approveRunButton);
-});
-
-els.downloadFinalButton.addEventListener("click", async () => {
-  try {
-    await runButtonAction(els.downloadFinalButton, async () => {
-      downloadFinalCsv();
-    });
-  } catch (error) {
-    setStatus(error.message);
-  }
-});
-
-els.auditBatchButton.addEventListener("click", async () => {
-  const batchName = normalizedBatchName();
-  if (!batchName) {
-    setStatus("Load a batch before running audit.");
+els.approveDraftButton.addEventListener("click", async () => {
+  const sampleCsvContent = els.sampleCsvEditor.value.trim();
+  if (!sampleCsvContent) {
+    setStatus("Generate a draft sample before approving.");
     return;
   }
-  setActionStatus("Running batch audit...");
+  setStatus("Approving draft sample...");
   try {
-    await runButtonAction(els.auditBatchButton, async () => {
-      const response = await postJson("/api/audit-batch", { name: batchName });
+    await runButtonAction(els.approveDraftButton, async () => {
+      const response = await postJson("/api/approve-sample", {
+        name: state.currentBatch || "",
+        sample_csv_name: state.sampleCsvFile ? state.sampleCsvFile.name : "approved_sample.csv",
+        sample_csv_content: sampleCsvContent,
+        document_files: await encodeFiles(state.documents),
+        source_urls: collectSourceUrls(),
+      });
       hydrateBatch(response.batch);
-      setActionStatus(JSON.stringify(response.audit, null, 2));
-      await loadBatchList();
+      setStatus(response.result?.message || "Draft approved. Hit Run Extraction to extract the full CSV.");
+      await refreshWorkspace();
     });
   } catch (error) {
-    setActionStatus(error.message);
+    setStatus(error.message);
   }
 });
 
 els.syncFinalButton.addEventListener("click", async () => {
   await runSync(els.syncFinalButton, false);
-});
-
-els.syncSampleButton.addEventListener("click", async () => {
-  await runSync(els.syncSampleButton, true);
 });
 
 els.reloadBatchesButton.addEventListener("click", async () => {
@@ -242,7 +220,11 @@ async function runSync(triggerButton, sample) {
   setActionStatus(sample ? "Syncing approved sample to Sheets..." : "Syncing final CSV to Sheets...");
   try {
     await runButtonAction(triggerButton, async () => {
-      const response = await postJson("/api/sync-batch", { name: batchName, sample });
+      const response = await postJson("/api/sync-batch", {
+        name: batchName,
+        sample,
+        sheet_link: els.sheetLinkInput.value.trim(),
+      });
       hydrateBatch(response.batch);
       setActionStatus(JSON.stringify(response.sync, null, 2));
       await loadBatchList();
@@ -302,21 +284,26 @@ function renderPreview() {
     els.previewPill.textContent = "Result";
     els.samplePreviewTitle.textContent = state.cleanCsvName || "Extracted CSV";
     renderReadOnlyGrid(els.samplePreviewTableWrap, state.cleanCsv, els.samplePreviewMeta);
-    els.sampleActions.hidden = true;
-    els.resultActions.hidden = false;
     els.resultSummary.hidden = false;
   } else {
     els.previewHeading.textContent = "Preview";
     els.previewPill.textContent = "CSV import";
     renderSamplePreview(els.sampleCsvEditor.value);
-    els.sampleActions.hidden = false;
-    els.resultActions.hidden = true;
     els.resultSummary.hidden = true;
   }
 }
 
 async function refreshWorkspace() {
   await loadBatchList();
+  // Prefill the sheet-link box with the currently linked sheet (unless the user is editing).
+  try {
+    const workspace = await getJson("/api/workspace");
+    if (els.sheetLinkInput && !els.sheetLinkInput.value.trim() && workspace.linked_sheet_id) {
+      els.sheetLinkInput.value = workspace.linked_sheet_id;
+    }
+  } catch (error) {
+    /* non-fatal: leave the field as-is */
+  }
 }
 
 async function seedBlankSampleTemplate() {
@@ -848,28 +835,29 @@ function spreadsheetColumnLabel(index) {
 
 function estimateColumnWidth(columnName) {
   const normalized = String(columnName || "").trim().toLowerCase();
-  if (normalized === "source") {
-    return 280;
-  }
+  // Description stays wide; every other column is compact and fixed.
   if (normalized === "description") {
-    return 460;
+    return 420;
+  }
+  if (normalized === "source") {
+    return 150;
   }
   if (normalized === "subject" || normalized === "domain" || normalized === "topic") {
-    return 240;
+    return 130;
   }
   if (normalized === "display standard code" || normalized === "standard code") {
-    return 170;
+    return 110;
   }
   if (normalized === "grade_level" || normalized === "display_grade" || normalized === "grade_number") {
-    return 160;
+    return 90;
   }
   if (normalized === "l3" || normalized === "l4" || normalized === "l5") {
-    return 180;
+    return 70;
   }
   if (normalized === "czi_standard_code") {
-    return 180;
+    return 110;
   }
-  return 190;
+  return 110;
 }
 
 function parseCsv(csvText) {
@@ -921,12 +909,8 @@ function initializeManagedButtons() {
   for (const button of [
     els.generateDraftButton,
     els.runExtractionButton,
-    els.downloadSampleButton,
-    els.downloadFinalButton,
-    els.approveRunButton,
-    els.auditBatchButton,
+    els.approveDraftButton,
     els.syncFinalButton,
-    els.syncSampleButton,
     els.reloadBatchesButton,
   ]) {
     if (!button) {
@@ -1016,12 +1000,12 @@ function updateButtonAvailability() {
 
   els.generateDraftButton.disabled = state.isBusy;
   els.runExtractionButton.disabled = state.isBusy;
-  els.downloadSampleButton.disabled = state.isBusy || !hasSample;
-  els.downloadFinalButton.disabled = state.isBusy || !state.cleanCsv.trim();
-  els.approveRunButton.disabled = state.isBusy || !hasSample;
-  els.auditBatchButton.disabled = state.isBusy || !state.batchCapabilities.hasFinalCsv;
+  // Approve Draft appears once a draft sample exists (and before final output), so the
+  // user can run the full extraction straight from the form.
+  els.approveDraftButton.hidden = !hasSample || state.showFinal;
+  els.approveDraftButton.disabled = state.isBusy;
+  // Sync to Sheets: enabled once the preview holds an extracted CSV.
   els.syncFinalButton.disabled = state.isBusy || !state.batchCapabilities.hasFinalCsv;
-  els.syncSampleButton.disabled = state.isBusy || !state.batchCapabilities.hasSampleArtifact;
   els.reloadBatchesButton.disabled = state.isBusy;
 
   for (const openButton of els.batchList.querySelectorAll(".batch-item button")) {
@@ -1041,7 +1025,48 @@ function switchTab(which) {
 }
 
 els.tabExtraction.addEventListener("click", () => switchTab("extraction"));
-els.tabReview.addEventListener("click", () => switchTab("review"));
+els.tabReview.addEventListener("click", () => {
+  switchTab("review");
+  if (!reviewState.batchesLoaded) loadReviewBatches();
+});
+
+function setReviewMode(mode) {
+  reviewState.mode = mode;
+  const isBatch = mode === "batch";
+  els.reviewBatchMode.hidden = !isBatch;
+  els.reviewExternalMode.hidden = isBatch;
+  els.reviewModeBatch.classList.toggle("active", isBatch);
+  els.reviewModeExternal.classList.toggle("active", !isBatch);
+  els.reviewModeBatch.setAttribute("aria-selected", String(isBatch));
+  els.reviewModeExternal.setAttribute("aria-selected", String(!isBatch));
+  els.reviewSummary.textContent = isBatch
+    ? "Pick an extracted subject and review it against its source."
+    : "Upload a CSV and source to check it.";
+  els.reviewFindings.innerHTML = "";
+  els.reviewFixRow.hidden = true;
+}
+
+els.reviewModeBatch.addEventListener("click", () => setReviewMode("batch"));
+els.reviewModeExternal.addEventListener("click", () => setReviewMode("external"));
+
+async function loadReviewBatches() {
+  try {
+    const payload = await getJson("/api/review-batches");
+    const batches = payload.batches || [];
+    reviewState.batchesLoaded = true;
+    if (!batches.length) {
+      els.reviewBatchSelect.innerHTML = '<option value="">No extracted CSVs yet</option>';
+      return;
+    }
+    els.reviewBatchSelect.innerHTML =
+      '<option value="">Select a subject…</option>' +
+      batches
+        .map((b) => `<option value="${escapeAttr(b.name)}">${escapeHtml(b.subject || b.name)}</option>`)
+        .join("");
+  } catch (error) {
+    els.reviewBatchSelect.innerHTML = '<option value="">Failed to load</option>';
+  }
+}
 
 els.reviewCsvFile.addEventListener("change", async (event) => {
   reviewState.csvFile = event.target.files[0] || null;
@@ -1055,8 +1080,6 @@ function showReviewCsvInPreview(csvText, title) {
   els.previewPill.textContent = "Review";
   els.samplePreviewTitle.textContent = title || "Uploaded CSV";
   renderReadOnlyGrid(els.samplePreviewTableWrap, csvText || "", els.samplePreviewMeta);
-  els.sampleActions.hidden = true;
-  els.resultActions.hidden = true;
   els.resultSummary.hidden = true;
 }
 
@@ -1066,26 +1089,38 @@ els.reviewSourceFile.addEventListener("change", (event) => {
 });
 
 els.reviewCsvButton.addEventListener("click", async () => {
-  if (!reviewState.csvFile) {
-    els.reviewSummary.textContent = "Upload a CSV to review.";
-    return;
-  }
-  const sourceUrl = els.reviewSourceUrl.value.trim();
-  if (!reviewState.sourceFile && !sourceUrl) {
-    els.reviewSummary.textContent = "Provide a source document (upload) or a source URL.";
-    return;
-  }
-  els.reviewSummary.textContent = "Reviewing CSV against source...";
-  els.reviewFindings.innerHTML = "";
-  try {
-    await runButtonAction(els.reviewCsvButton, async () => {
-      const payload = {
+  const instructions = els.reviewInstructions.value.trim();
+  let request;
+  if (reviewState.mode === "batch") {
+    const name = els.reviewBatchSelect.value;
+    if (!name) {
+      els.reviewSummary.textContent = "Select an extracted subject to review.";
+      return;
+    }
+    request = async () => postJson("/api/review-batch", { name, review_instructions: instructions });
+  } else {
+    if (!reviewState.csvFile) {
+      els.reviewSummary.textContent = "Upload a CSV to review.";
+      return;
+    }
+    const sourceUrl = els.reviewSourceUrl.value.trim();
+    if (!reviewState.sourceFile && !sourceUrl) {
+      els.reviewSummary.textContent = "Provide a source document (upload) or a source URL.";
+      return;
+    }
+    request = async () =>
+      postJson("/api/review-csv", {
         csv_file: (await encodeFiles([reviewState.csvFile]))[0],
         source_files: reviewState.sourceFile ? await encodeFiles([reviewState.sourceFile]) : [],
         source_urls: sourceUrl,
-        review_instructions: els.reviewInstructions.value.trim(),
-      };
-      const response = await postJson("/api/review-csv", payload);
+        review_instructions: instructions,
+      });
+  }
+  els.reviewSummary.textContent = "Reviewing against source...";
+  els.reviewFindings.innerHTML = "";
+  try {
+    await runButtonAction(els.reviewCsvButton, async () => {
+      const response = await request();
       renderReviewResult(response.review);
     });
   } catch (error) {
@@ -1204,19 +1239,31 @@ async function buildReviewSourcePayload(extra = {}) {
 }
 
 els.approveFixButton.addEventListener("click", async () => {
-  if (!reviewState.csvFile) {
-    els.reviewFixSummary.hidden = false;
-    els.reviewFixSummary.textContent = "Upload a CSV first.";
-    return;
+  const approved_findings = collectApprovedFindings();
+  const suggestions = els.reviewSuggestions.value.trim();
+  let request;
+  if (reviewState.mode === "batch") {
+    const name = els.reviewBatchSelect.value;
+    if (!name) {
+      els.reviewFixSummary.hidden = false;
+      els.reviewFixSummary.textContent = "Select an extracted subject first.";
+      return;
+    }
+    request = async () => postJson("/api/fix-reviewed-batch", { name, approved_findings, suggestions });
+  } else {
+    if (!reviewState.csvFile) {
+      els.reviewFixSummary.hidden = false;
+      els.reviewFixSummary.textContent = "Upload a CSV first.";
+      return;
+    }
+    request = async () =>
+      postJson("/api/fix-reviewed-csv", await buildReviewSourcePayload({ approved_findings }));
   }
   els.reviewFixSummary.hidden = false;
   els.reviewFixSummary.textContent = "Fixing rows against source...";
   try {
     await runButtonAction(els.approveFixButton, async () => {
-      const response = await postJson(
-        "/api/fix-reviewed-csv",
-        await buildReviewSourcePayload({ approved_findings: collectApprovedFindings() }),
-      );
+      const response = await request();
       const fix = response.fix || {};
       reviewState.correctedCsv = fix.corrected_csv || "";
       reviewState.correctedName = fix.corrected_name || "reviewed.fixed.csv";

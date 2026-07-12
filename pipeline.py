@@ -27,6 +27,7 @@ from csv_finalization import finalize_extracted_csv
 from parsers.router import discover_supported_files, parse_input
 from schemas import (
     REVIEW_STATUS_NEEDS_REVIEW,
+    apply_row_guards,
     csv_headers,
     flatten_row,
     get_schema_fields,
@@ -332,6 +333,18 @@ class DataTransformationPipeline:
                 return [str(exc)]
             return []
 
+        def guard_row(row: BaseModel) -> tuple[BaseModel, list[str]]:
+            # Deterministic QC guards applied AFTER the LLM reviewer, so they get the
+            # final word on grade/domain/prefix regardless of the (now cheaper) review
+            # model. Returns the corrected row + any unfixable issues (e.g. an unmappable
+            # grade_level) which flow into the row's issue list -> NEEDS_REVIEW.
+            fixed_values, guard_issues = apply_row_guards(row.model_dump())
+            try:
+                guarded = row.__class__.model_validate(fixed_values)
+            except Exception:  # noqa: BLE001 - if a fixed value fails validation, keep original
+                return row, guard_issues
+            return guarded, guard_issues
+
         def evaluate_and_fix(built: list[BaseModel], prior_issues: list[list[str]] | None) -> list[tuple[BaseModel, Any, list[str]]]:
             """One merged call per batch: fix + verdict. Falls back to the
             separate reviewer/critic calls for engines without the merged method."""
@@ -342,9 +355,11 @@ class DataTransformationPipeline:
                     )
                     out: list[tuple[BaseModel, Any, list[str]]] = []
                     for result in merged:
-                        # Combine the model's remaining issues with the deterministic preflight.
-                        issues = list(result.remaining_issues) + preflight_issues(result.row)
-                        out.append((result.row, result.metadata, issues))
+                        # Deterministic guards get the final word on the LLM's output, then
+                        # combine model issues + guard issues + preflight.
+                        guarded_row, guard_issues = guard_row(result.row)
+                        issues = list(result.remaining_issues) + guard_issues + preflight_issues(guarded_row)
+                        out.append((guarded_row, result.metadata, issues))
                     return out
                 except Exception as exc:  # noqa: BLE001 - fall back to the two-call path
                     self.logger.warning(
@@ -367,10 +382,11 @@ class DataTransformationPipeline:
                         verdicts.append(self.critic.validate(row, parsed_document))
                     except Exception as exc:  # noqa: BLE001
                         verdicts.append(exc)
-            return [
-                (row, review_metadata, verdict_issues(verdict))
-                for (row, review_metadata), verdict in zip(reviewed, verdicts)
-            ]
+            out: list[tuple[BaseModel, Any, list[str]]] = []
+            for (row, review_metadata), verdict in zip(reviewed, verdicts):
+                guarded_row, guard_issues = guard_row(row)
+                out.append((guarded_row, review_metadata, verdict_issues(verdict) + guard_issues))
+            return out
 
         def handle_batch(batch: list[BaseModel]) -> tuple[list[tuple[BaseModel, Any]], list[dict[str, Any]]]:
             # Track each row by its position in the batch across fix passes.

@@ -21,7 +21,7 @@ from batch_runner import (
     create_model_settings,
     run_batches,
 )
-from config import DEFAULT_SCHEMA_CONFIG_PATH, INPUT_DIR, OUTPUT_DIR, ROOT_DIR, Settings, get_runtime_paths
+from config import DEFAULT_SCHEMA_CONFIG_PATH, INPUT_DIR, OUTPUT_DIR, ROOT_DIR, RUNTIME_DIR, Settings, get_runtime_paths
 from csv_audit import audit_extracted_csv
 from csv_finalization import finalize_extracted_csv
 from schemas import get_output_column_name, load_schema_config
@@ -34,6 +34,48 @@ MAX_FILE_SIZE_BYTES = 20 * 1024 * 1024
 VALID_BATCH_NAME = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]*$")
 SAMPLE_ROW_RANGE_PATTERN = re.compile(r"\b(\d{1,2})\s*(?:to|-)\s*(\d{1,2})\s*rows?\b", re.IGNORECASE)
 SAMPLE_ROW_COUNT_PATTERN = re.compile(r"\b(\d{1,2})\s*rows?\b", re.IGNORECASE)
+
+# Sticky Google Sheet target. A pasted link/ID is saved here and reused for every
+# subsequent sync until the user pastes a different one (global, not per-batch).
+SHEET_LINK_PATH = RUNTIME_DIR / "google_sheet_link.json"
+_SHEET_ID_IN_URL = re.compile(r"/spreadsheets/d/([a-zA-Z0-9\-_]+)")
+_SHEET_ID_BARE = re.compile(r"^[a-zA-Z0-9\-_]{20,}$")
+
+
+def extract_sheet_id(link_or_id: str) -> str:
+    """Pull the spreadsheet ID from a full Sheets URL, or accept a raw ID."""
+    text = (link_or_id or "").strip()
+    if not text:
+        return ""
+    match = _SHEET_ID_IN_URL.search(text)
+    if match:
+        return match.group(1)
+    return text if _SHEET_ID_BARE.match(text) else ""
+
+
+def _load_saved_sheet_id() -> str:
+    try:
+        data = json.loads(SHEET_LINK_PATH.read_text(encoding="utf-8"))
+        return str(data.get("spreadsheet_id", "") or "").strip()
+    except (OSError, json.JSONDecodeError):
+        return ""
+
+
+def _save_sheet_id(spreadsheet_id: str) -> None:
+    SHEET_LINK_PATH.parent.mkdir(parents=True, exist_ok=True)
+    SHEET_LINK_PATH.write_text(json.dumps({"spreadsheet_id": spreadsheet_id}, indent=2), encoding="utf-8")
+
+
+def resolve_sheet_id(settings: Settings, pasted: str = "") -> str:
+    """Precedence: a freshly pasted link/ID (saved) > last saved > .env default."""
+    extracted = extract_sheet_id(pasted)
+    if extracted:
+        _save_sheet_id(extracted)
+        return extracted
+    saved = _load_saved_sheet_id()
+    if saved:
+        return saved
+    return (settings.google_sheets_spreadsheet_id or "").strip()
 
 
 class UiServer(ThreadingHTTPServer):
@@ -62,6 +104,9 @@ class UiRequestHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/workspace":
             self._send_json(load_workspace_summary(self.server.settings))
             return
+        if parsed.path == "/api/review-batches":
+            self._send_json({"batches": _reviewable_batches()})
+            return
         if parsed.path.startswith("/api/batches/"):
             batch_name = unquote(parsed.path.removeprefix("/api/batches/"))
             self._send_json(load_batch_detail(batch_name))
@@ -74,6 +119,10 @@ class UiRequestHandler(BaseHTTPRequestHandler):
             payload = self._read_json_payload()
             if parsed.path == "/api/draft-sample":
                 response = self._handle_draft_sample(payload)
+                self._send_json(response)
+                return
+            if parsed.path == "/api/approve-sample":
+                response = handle_approve_sample(self.server.settings, payload)
                 self._send_json(response)
                 return
             if parsed.path == "/api/run-extraction":
@@ -90,6 +139,14 @@ class UiRequestHandler(BaseHTTPRequestHandler):
                 return
             if parsed.path == "/api/fix-reviewed-csv":
                 response = handle_fix_reviewed_csv(self.server.settings, payload)
+                self._send_json(response)
+                return
+            if parsed.path == "/api/review-batch":
+                response = handle_review_batch(self.server.settings, payload)
+                self._send_json(response)
+                return
+            if parsed.path == "/api/fix-reviewed-batch":
+                response = handle_fix_reviewed_batch(self.server.settings, payload)
                 self._send_json(response)
                 return
             if parsed.path == "/api/sync-batch":
@@ -199,6 +256,31 @@ def handle_draft_sample(settings: Settings, payload: dict[str, Any]) -> dict[str
     batch_result = run_batches(request, settings)[0]
     return {
         "result": serialize_batch_result(batch_result),
+        "batch": load_batch_detail(batch_name),
+    }
+
+
+def handle_approve_sample(settings: Settings, payload: dict[str, Any]) -> dict[str, Any]:
+    """Persist the draft sample as the approved sample CSV — WITHOUT running extraction.
+
+    Splits the old approve-and-run into two steps: this only saves the approved sample so
+    the user can review it; the full pipeline runs separately when Run Extraction is hit.
+    """
+    source_urls = _parse_source_urls(payload.get("source_urls"))
+    sample_csv_content = str(payload.get("sample_csv_content", "")).strip()
+    upload_names = [str(item.get("name", "")) for item in (payload.get("document_files") or [])]
+    batch_name = _resolve_batch_name(
+        payload.get("name"),
+        sample_csv_content=sample_csv_content,
+        source_urls=source_urls,
+        document_files=upload_names,
+    )
+    if not sample_csv_content:
+        raise ValueError("There is no draft sample to approve yet.")
+    sample_csv_name = str(payload.get("sample_csv_name", "")).strip() or "approved_sample.csv"
+    persist_sample_csv(batch_name, sample_csv_name, sample_csv_content)
+    return {
+        "result": {"approved": True, "batch": batch_name, "message": "Draft approved. Run Extraction to extract the full CSV."},
         "batch": load_batch_detail(batch_name),
     }
 
@@ -497,7 +579,11 @@ def handle_fix_reviewed_csv(settings: Settings, payload: dict[str, Any]) -> dict
         writer.writerow({col: row.get(col, "") for col in original_fieldnames})
     corrected_csv = buffer.getvalue()
 
-    corrected_name = (csv_payload.get("name") if csv_payload else "reviewed.csv") or "reviewed.csv"
+    corrected_name = (
+        (csv_payload.get("name") if csv_payload else None)
+        or str(payload.get("corrected_name") or "").strip()
+        or "reviewed.csv"
+    )
     if corrected_name.lower().endswith(".csv"):
         corrected_name = corrected_name[:-4]
     corrected_name = f"{corrected_name}.fixed.csv"
@@ -509,6 +595,179 @@ def handle_fix_reviewed_csv(settings: Settings, payload: dict[str, Any]) -> dict
             "corrected_csv": corrected_csv,
             "corrected_name": corrected_name,
             "message": f"Fixed {fixed_count} of {len(flagged_indices)} flagged row(s) against {parsed_document.source_name}.",
+        }
+    }
+
+
+def _reviewable_batches() -> list[dict[str, str]]:
+    """Batches with an extracted CSV, labeled by their Subject for the review dropdown."""
+    import csv as _csv
+
+    out: list[dict[str, str]] = []
+    if not CHAT_BATCH_OUTPUT_DIR.exists():
+        return out
+    for batch_root in sorted(
+        (p for p in CHAT_BATCH_OUTPUT_DIR.iterdir() if p.is_dir()),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    ):
+        output_csv = find_output_csv(batch_root / "output")
+        if output_csv is None:
+            continue
+        subject = ""
+        try:
+            with output_csv.open(newline="", encoding="utf-8-sig") as handle:
+                first = next(_csv.DictReader(handle), {})
+            subject = (first.get("subject") or first.get("Subject") or "").strip()
+        except Exception:  # noqa: BLE001 - a label read must never break the list
+            subject = ""
+        out.append({"name": batch_root.name, "subject": subject or batch_root.name})
+    return out
+
+
+def handle_review_batch(settings: Settings, payload: dict[str, Any]) -> dict[str, Any]:
+    """Review an APP-EXTRACTED batch's CSV against the sources it recorded.
+
+    Uses the batch's extracted CSV and each row's own `source` value — the per-row-source
+    audit path, which fetches each distinct source ONCE (cached). Returns the same inline
+    `findings` shape as handle_review_csv so the existing Review UI renders unchanged.
+    """
+    import json as _json
+
+    batch_name = validate_batch_name(payload.get("name"))
+    review_instructions = str(payload.get("review_instructions", "") or "").strip() or None
+    batch_root = get_batch_root(batch_name)
+    output_dir = batch_root / "output"
+    output_csv = find_output_csv(output_dir)
+    if output_csv is None:
+        raise ValueError("This batch has no extracted CSV to review yet.")
+
+    batch_settings = _resolve_batch_settings(settings, output_dir)
+    runtime_paths = get_runtime_paths(batch_root)
+    result = audit_extracted_csv(
+        output_csv,
+        batch_settings,
+        runtime_paths=runtime_paths,
+        user_instructions=review_instructions,
+    )
+    findings = _json.loads(Path(result.report_path).read_text(encoding="utf-8")) if Path(result.report_path).exists() else []
+    return {
+        "review": {
+            "rows_audited": result.rows_audited,
+            "issue_count": result.issue_count,
+            "report_path": result.report_path,
+            "source": batch_name,
+            "findings": findings,
+        }
+    }
+
+
+def handle_fix_reviewed_batch(settings: Settings, payload: dict[str, Any]) -> dict[str, Any]:
+    """Fix approved rows of an APP-EXTRACTED batch's CSV against its source(s).
+
+    Rows are grouped by their own `source` value and each group is fixed against its own
+    source document (reusing the single-source fix on a per-source subset CSV), then all
+    groups are reassembled into one corrected CSV preserving original row order. Best-effort:
+    if one source fails to fetch/fix, its rows are left unchanged and the failure is reported;
+    the rest still get fixed.
+    """
+    import csv as _csv
+    import io
+
+    batch_name = validate_batch_name(payload.get("name"))
+    batch_root = get_batch_root(batch_name)
+    output_csv = find_output_csv(batch_root / "output")
+    if output_csv is None:
+        raise ValueError("This batch has no extracted CSV to fix yet.")
+
+    with output_csv.open(newline="", encoding="utf-8-sig") as handle:
+        reader = _csv.DictReader(handle)
+        fieldnames = reader.fieldnames or []
+        all_rows = list(reader)
+
+    # Map each data row (0-based) to its source; row_number in findings is line i+2.
+    def row_source(row: dict) -> str:
+        return (row.get("source") or "").strip()
+
+    sources = [s for s in {row_source(r) for r in all_rows} if s]
+    if not sources:
+        raise ValueError("This batch's rows have no source reference to fix against.")
+
+    approved_findings = payload.get("approved_findings") or []
+    suggestions = str(payload.get("suggestions", "") or "").strip()
+
+    total_fixed = 0
+    skipped_sources: list[str] = []
+    corrected_by_index: dict[int, dict] = {}
+
+    for source in sources:
+        # Rows (original indices) belonging to this source, in order.
+        group = [i for i, r in enumerate(all_rows) if row_source(r) == source]
+        if not group:
+            continue
+        # Subset CSV for this source; subset line number = local position + 2.
+        subset_buf = io.StringIO()
+        writer = _csv.DictWriter(subset_buf, fieldnames=fieldnames)
+        writer.writeheader()
+        for i in group:
+            writer.writerow({c: all_rows[i].get(c, "") for c in fieldnames})
+        # Remap approved findings to this subset's line numbers.
+        orig_line_to_local = {orig + 2: local for local, orig in enumerate(group)}
+        subset_findings = []
+        for f in approved_findings:
+            try:
+                rn = int(f.get("row_number"))
+            except (TypeError, ValueError):
+                continue
+            if rn in orig_line_to_local:
+                subset_findings.append({"row_number": orig_line_to_local[rn] + 2, "issue": f.get("issue")})
+        if not subset_findings and not suggestions:
+            continue
+
+        try:
+            result = handle_fix_reviewed_csv(
+                settings,
+                {
+                    "csv_content": subset_buf.getvalue(),
+                    "csv_file": None,
+                    "source_urls": source,
+                    "source_files": [],
+                    "approved_findings": subset_findings,
+                    "suggestions": suggestions,
+                    "corrected_name": batch_name,
+                },
+            )
+        except Exception as exc:  # noqa: BLE001 - best-effort: skip this source, keep the rest
+            LOGGER.warning("Fix skipped for source %s (%s).", source, exc)
+            skipped_sources.append(source)
+            continue
+
+        total_fixed += int(result.get("fix", {}).get("fixed_count", 0))
+        # Parse the group's corrected CSV and map rows back to original indices by order.
+        corrected_rows = list(_csv.DictReader(io.StringIO(result["fix"]["corrected_csv"])))
+        for local, orig in enumerate(group):
+            if local < len(corrected_rows):
+                corrected_by_index[orig] = corrected_rows[local]
+
+    # Reassemble the full CSV in original order, using corrected rows where available.
+    out_buf = io.StringIO()
+    out_writer = _csv.DictWriter(out_buf, fieldnames=fieldnames)
+    out_writer.writeheader()
+    for i, row in enumerate(all_rows):
+        chosen = corrected_by_index.get(i, row)
+        out_writer.writerow({c: chosen.get(c, "") for c in fieldnames})
+
+    message = f"Fixed {total_fixed} row(s) across {len(sources)} source(s)."
+    if skipped_sources:
+        message += f" {len(skipped_sources)} source(s) skipped (fetch/fix error)."
+    return {
+        "fix": {
+            "fixed_count": total_fixed,
+            "sources": len(sources),
+            "skipped_sources": skipped_sources,
+            "corrected_csv": out_buf.getvalue(),
+            "corrected_name": f"{batch_name}.fixed.csv",
+            "message": message,
         }
     }
 
@@ -528,6 +787,16 @@ def handle_sync_batch(settings: Settings, payload: dict[str, Any]) -> dict[str, 
             raise ValueError("No extracted CSV exists for this batch yet.")
 
     batch_settings = _resolve_batch_settings(settings, output_dir)
+    # Sticky sheet target: a pasted link/ID wins and is saved; else last saved; else env.
+    from dataclasses import replace as _replace
+
+    sheet_id = resolve_sheet_id(batch_settings, str(payload.get("sheet_link", "") or ""))
+    if not sheet_id:
+        raise ValueError(
+            "No Google Sheet linked. Paste a Google Sheet link (or ID) to sync, "
+            "or set GOOGLE_SHEETS_SPREADSHEET_ID."
+        )
+    batch_settings = _replace(batch_settings, google_sheets_spreadsheet_id=sheet_id)
     runtime_paths = get_runtime_paths(batch_root)
     result = finalize_extracted_csv(
         csv_path,
@@ -548,6 +817,7 @@ def handle_sync_batch(settings: Settings, payload: dict[str, Any]) -> dict[str, 
             "sync_status": result.sync_status,
             "sync_message": result.sync_message,
             "sheet_name": result.sheet_name,
+            "spreadsheet_id": sheet_id,
         },
         "batch": load_batch_detail(batch_name),
     }
@@ -803,6 +1073,7 @@ def load_workspace_summary(settings: Settings) -> dict[str, Any]:
         "final_output_path": str(final_csv_path),
         "google_sheets_sync_enabled": bool(settings.google_sheets_sync_enabled),
         "google_sheets_spreadsheet_id_present": bool(settings.google_sheets_spreadsheet_id),
+        "linked_sheet_id": resolve_sheet_id(settings),
         "oauth_client_secret_present": bool(settings.google_oauth_client_secret_path),
         "oauth_token_present": Path(settings.google_oauth_token_path).expanduser().exists(),
     }

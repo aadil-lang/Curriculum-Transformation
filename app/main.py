@@ -111,6 +111,10 @@ def _create_app() -> FastAPI:
     def workspace() -> JSONResponse:
         return JSONResponse(content=ui_server.load_workspace_summary(settings))
 
+    @app.get(f"{BASE_PREFIX}/api/review-batches")
+    def review_batches() -> JSONResponse:
+        return JSONResponse(content={"batches": ui_server._reviewable_batches()})
+
     @app.get(f"{BASE_PREFIX}/api/batches/{{batch_name}}")
     def batch_detail(batch_name: str) -> JSONResponse:
         try:
@@ -122,6 +126,10 @@ def _create_app() -> FastAPI:
     @app.post(f"{BASE_PREFIX}/api/draft-sample")
     async def draft_sample(request: Request) -> JSONResponse:
         return _run(ui_server.handle_draft_sample, await request.json())
+
+    @app.post(f"{BASE_PREFIX}/api/approve-sample")
+    async def approve_sample(request: Request) -> JSONResponse:
+        return _run(ui_server.handle_approve_sample, await request.json())
 
     @app.post(f"{BASE_PREFIX}/api/run-extraction")
     async def run_extraction(request: Request) -> JSONResponse:
@@ -142,6 +150,14 @@ def _create_app() -> FastAPI:
     @app.post(f"{BASE_PREFIX}/api/fix-reviewed-csv")
     async def fix_reviewed_csv(request: Request) -> JSONResponse:
         return _run(ui_server.handle_fix_reviewed_csv, await request.json())
+
+    @app.post(f"{BASE_PREFIX}/api/review-batch")
+    async def review_batch(request: Request) -> JSONResponse:
+        return _run(ui_server.handle_review_batch, await request.json())
+
+    @app.post(f"{BASE_PREFIX}/api/fix-reviewed-batch")
+    async def fix_reviewed_batch(request: Request) -> JSONResponse:
+        return _run(ui_server.handle_fix_reviewed_batch, await request.json())
 
     LOGGER.info("FastAPI app initialized. Base prefix: %s", BASE_PREFIX)
     return app

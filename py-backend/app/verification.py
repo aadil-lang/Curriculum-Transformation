@@ -25,7 +25,6 @@ class OfflineVerificationResult:
     process_results: list[dict[str, str]]
     csv_rows: list[dict[str, str]]
     manual_review_entries: list[dict[str, Any]]
-    retry_recovery: dict[str, Any]
     chat_batch: dict[str, Any]
     instruction_batch: dict[str, Any]
 
@@ -35,7 +34,11 @@ class StubExtractionEngine:
         self.schema_path = schema_path
 
     def extract(self, parsed_document: Any, prior_error_log: str | None = None, region_override: Any | None = None) -> Any:
-        payload_model = get_extraction_payload_model(self.schema_path)
+        from config import get_settings
+
+        payload_model = get_extraction_payload_model(
+            self.schema_path, include_citations=get_settings().extraction_citations_enabled
+        )
         payload = payload_model.model_validate(_build_stub_payload(self.schema_path))
         planning = PreExtractionUnderstanding(
             layout_analysis=["Heading followed by labeled key-value paragraphs."],
@@ -57,18 +60,26 @@ class StubCritic:
         return SimpleNamespace(tag="VALID", is_valid=True, issues=[], confidence_notes="")
 
 
-class MissingKeyExtractor:
-    def extract(self, parsed_document: Any, prior_error_log: str | None = None, region_override: Any | None = None) -> Any:
-        raise RuntimeError("GEMINI_API_KEY is not configured.")
+def _add_curriculum_fixture_content(document: "Document") -> None:
+    """Curriculum-shaped fixture content matching the stub payload values.
+
+    offline-verify runs the REAL reviewer, which rejects values not supported by the
+    source. So the fixture must contain the curriculum content the stub 'extracts'
+    (Grade 5 Science, Forces and Motion, standard SC.5.P.13.1).
+    """
+    document.add_heading("Grade 5 Science Standards", level=1)
+    document.add_paragraph("Subject: Science")
+    document.add_paragraph("Grade Level: Elementary School (Grade 5)")
+    document.add_paragraph("Domain: Physical Science")
+    document.add_paragraph("Topic: Forces and Motion")
+    document.add_paragraph(
+        "SC.5.P.13.1 Identify familiar forces that cause objects to move, such as pushes or pulls."
+    )
 
 
 def _build_verification_inputs(runtime_paths: RuntimePaths) -> None:
     success_doc = Document()
-    success_doc.add_heading("Offline Verification Doc", level=1)
-    success_doc.add_paragraph("Owner: Verification Vendor")
-    success_doc.add_paragraph("Date: 2026-07-05")
-    success_doc.add_paragraph("Amount: 42.00")
-    success_doc.add_paragraph("Offline verification summary line")
+    _add_curriculum_fixture_content(success_doc)
     success_doc.save(runtime_paths.input_dir / "verified_smoke.docx")
 
     (runtime_paths.input_dir / "bad_reference.webloc").write_text(
@@ -101,7 +112,6 @@ def run_offline_smoke_verification() -> OfflineVerificationResult:
         if runtime_paths.manual_review_path.exists():
             manual_review_entries = json.loads(runtime_paths.manual_review_path.read_text(encoding="utf-8"))
 
-        retry_recovery = _run_retry_recovery_verification(settings)
         chat_batch = _run_chat_batch_verification(settings)
         instruction_batch = _run_instruction_batch_verification(settings)
 
@@ -124,87 +134,9 @@ def run_offline_smoke_verification() -> OfflineVerificationResult:
             ],
             csv_rows=csv_rows,
             manual_review_entries=manual_review_entries,
-            retry_recovery=retry_recovery,
             chat_batch=chat_batch,
             instruction_batch=instruction_batch,
         )
-
-
-def _run_retry_recovery_verification(settings: Any) -> dict[str, Any]:
-    tracked_env_keys = ("GEMINI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY")
-    original_env = {key: os.environ.get(key) for key in tracked_env_keys}
-
-    try:
-        for key in tracked_env_keys:
-            os.environ.pop(key, None)
-
-        with tempfile.TemporaryDirectory(prefix="data-agent-retry-") as temp_root_str:
-            temp_root = Path(temp_root_str)
-            runtime_paths = get_runtime_paths(temp_root)
-
-            document = Document()
-            document.add_heading("Offline Verification Doc", level=1)
-            document.add_paragraph("Owner: Verification Vendor")
-            document.add_paragraph("Date: 2026-07-05")
-            document.add_paragraph("Amount: 42.00")
-            document.add_paragraph("Offline verification summary line")
-            document.save(runtime_paths.input_dir / "retry_after_config.docx")
-
-            first_pipeline = DataTransformationPipeline(
-                settings=settings,
-                runtime_paths=runtime_paths,
-                extractor=MissingKeyExtractor(),
-                critic=StubCritic(),
-            )
-            first_results = first_pipeline.process_pending_documents()
-            first_state = json.loads(runtime_paths.state_path.read_text(encoding="utf-8"))
-
-            os.environ["GEMINI_API_KEY"] = "dummy-gemini-key"
-            os.environ["OPENAI_API_KEY"] = "dummy-openai-key"
-
-            second_pipeline = DataTransformationPipeline(
-                settings=settings,
-                runtime_paths=runtime_paths,
-                extractor=StubExtractionEngine(str(settings.schema_config_path)),
-                critic=StubCritic(),
-            )
-            second_results = second_pipeline.process_pending_documents()
-            second_state = json.loads(runtime_paths.state_path.read_text(encoding="utf-8"))
-
-            csv_rows: list[dict[str, str]] = []
-            if runtime_paths.final_csv_path.exists():
-                with runtime_paths.final_csv_path.open(newline="", encoding="utf-8") as handle:
-                    csv_rows = list(csv.DictReader(handle))
-
-            return {
-                "first_results": [
-                    {
-                        "path": str(result.path),
-                        "status": result.status,
-                        "message": result.message,
-                        "stage": result.stage,
-                    }
-                    for result in first_results
-                ],
-                "first_state": first_state,
-                "second_results": [
-                    {
-                        "path": str(result.path),
-                        "status": result.status,
-                        "message": result.message,
-                        "stage": result.stage,
-                    }
-                    for result in second_results
-                ],
-                "second_state": second_state,
-                "csv_rows": csv_rows,
-            }
-    finally:
-        for key, value in original_env.items():
-            if value is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = value
 
 
 def _run_chat_batch_verification(settings: Any) -> dict[str, Any]:
@@ -287,10 +219,39 @@ def _run_instruction_batch_verification(settings: Any) -> dict[str, Any]:
 
 
 def _build_stub_payload(schema_path: str | None) -> dict[str, Any]:
+    # Only emit `<field>_source_citation` keys when the actual payload model has them
+    # (i.e. citations enabled). The model is extra="forbid", so injecting citation keys
+    # while citations are disabled fails validation — the stub must match the real model.
+    from config import get_settings
+
+    include_citations = get_settings().extraction_citations_enabled
+    payload_model = get_extraction_payload_model(schema_path, include_citations=include_citations)
+    model_fields = set(payload_model.model_fields.keys())
+
+    # Contract-valid curriculum values that MATCH the verification fixture document
+    # (see _build_verification_inputs). The real reviewer runs during offline-verify and
+    # rejects placeholder junk, so these must look like genuine extracted curriculum rows
+    # — e.g. grade_level must be one of the allowed buckets.
+    curriculum_values: dict[str, str] = {
+        "source": "https://example.edu/curriculum/science/grade-5",
+        "grade_level": "Elementary School",
+        "display_grade": "5",
+        "grade_number": "5",
+        "subject": "Science",
+        "domain": "Physical Science",
+        "topic": "Forces and Motion",
+        "standard_code": "SC.5.P.13.1",
+        "display_standard_code": "SC.5.P.13.1",
+        "description": "Identify familiar forces that cause objects to move, such as pushes or pulls.",
+    }
+
     payload: dict[str, Any] = {}
     for spec in get_schema_fields(schema_path):
-        if spec.field_type == "number":
-            value: Any = 42.0
+        if spec.name in curriculum_values:
+            value: Any = curriculum_values[spec.name]
+            citation = str(value)
+        elif spec.field_type == "number":
+            value = 42.0
             citation = "42.00"
         elif spec.field_type == "integer":
             value = 7
@@ -299,8 +260,12 @@ def _build_stub_payload(schema_path: str | None) -> dict[str, Any]:
             value = True
             citation = "true"
         else:
-            value = f"sample_{spec.name}"
-            citation = value
+            # Optional/unknown fields (l3/l4/l5, czi_standard_code) stay blank — valid and
+            # matches the sample-blank contract rather than inventing hierarchy levels.
+            value = ""
+            citation = ""
         payload[spec.name] = value
-        payload[f"{spec.name}_source_citation"] = citation
+        citation_key = f"{spec.name}_source_citation"
+        if citation_key in model_fields:
+            payload[citation_key] = citation
     return payload

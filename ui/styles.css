@@ -207,7 +207,26 @@ textarea {
 }
 
 .panel-form textarea {
-  min-height: 5.5rem;
+  min-height: 4.5rem;
+}
+
+/* Compact form controls: smaller text + tighter padding in the form panel. */
+.panel-form textarea,
+.panel-form input[type="text"],
+.panel-form input[type="file"],
+.panel-form .select-input {
+  font-size: 0.8rem;
+  padding: 9px 12px;
+  border-radius: 12px;
+}
+
+.panel-form .field span {
+  font-size: 0.8rem;
+  margin-bottom: 5px;
+}
+
+.panel-form .field {
+  margin-bottom: 11px;
 }
 
 .panel-form .field {
@@ -394,15 +413,14 @@ textarea {
 .sheet-formula-bar {
   display: grid;
   grid-template-columns: 76px 56px minmax(0, 1fr);
-  align-items: center;
+  align-items: stretch;
   min-height: 52px;
   background: #16181a;
   border-bottom: 1px solid rgba(255, 255, 255, 0.08);
 }
 
 .sheet-cell-ref,
-.sheet-fx,
-.sheet-formula-value {
+.sheet-fx {
   min-height: 52px;
   display: flex;
   align-items: center;
@@ -427,10 +445,18 @@ textarea {
   min-width: 0;
   border-right: 0;
   color: #f0f3f6;
-  font-size: 0.95rem;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  font-size: 0.9rem;
+  /* Full cell text, wrapped to new lines, scrolls if very long. Plain block (not flex)
+     so pre-wrap actually wraps and the box grows with the content. */
+  display: block;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  overflow-y: auto;
+  min-height: 52px;
+  max-height: 140px;
+  padding: 10px 14px;
+  line-height: 1.4;
 }
 
 .sheet-grid {
@@ -449,8 +475,9 @@ textarea {
 }
 
 .sheet-table {
-  width: max-content;
-  min-width: 100%;
+  /* table-layout:fixed + width:auto makes columns honor their <col> widths exactly and
+     NOT grow to fit long cell content (content is clipped/ellipsised instead). */
+  width: auto;
   border-collapse: separate;
   border-spacing: 0;
   table-layout: fixed;
@@ -551,17 +578,18 @@ button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 10px;
+  gap: 8px;
   border: 0;
   border-radius: 999px;
-  padding: 12px 18px;
+  padding: 8px 14px;
   font: inherit;
-  font-weight: 700;
+  font-size: 0.82rem;
+  font-weight: 600;
   color: white;
   background: #435451;
   cursor: pointer;
   transition: transform 140ms ease, box-shadow 140ms ease, opacity 140ms ease;
-  box-shadow: 0 14px 24px rgba(31, 42, 44, 0.16);
+  box-shadow: 0 8px 16px rgba(31, 42, 44, 0.14);
 }
 
 button:hover {
@@ -936,6 +964,45 @@ pre {
   border: 1px solid var(--line);
   border-radius: 8px;
   font: inherit;
+}
+
+.review-mode-toggle {
+  display: flex;
+  gap: 6px;
+  margin: 4px 0 14px;
+}
+
+.review-mode-toggle .tab-button {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 6px 12px;
+}
+
+.review-mode-toggle .tab-button.active {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+
+.select-input {
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font: inherit;
+  background: var(--panel-strong);
+  width: 100%;
+}
+
+.sheet-link-field {
+  margin: 4px 0 10px;
+}
+
+.sheet-link-field input {
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font: inherit;
+  width: 100%;
 }
 
 .finding-item.suppressed {

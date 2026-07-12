@@ -25,6 +25,100 @@ GRADE_LEVEL_NAMING_RULE = (
 )
 
 
+# Program/course labels that name a course, not a learner grade band — must never
+# occupy display_grade / grade_number.
+PROGRAM_GRADE_LABELS = frozenset(
+    {
+        "ap", "advanced placement", "ib", "international baccalaureate",
+        "honors", "honours", "gcse", "igcse", "a-level", "a level",
+        "as-level", "as level",
+    }
+)
+_GRADE_LEVEL_BUCKETS_LOWER = frozenset(b.lower() for b in ALLOWED_GRADE_LEVELS)
+_STRUCTURAL_PREFIX = __import__("re").compile(
+    r"^\s*(?:unit|topic|module|cluster|lesson|section|chapter)\s+[0-9]+[.:)\-]?[0-9]*\s*[:.\-]?\s*",
+    __import__("re").IGNORECASE,
+)
+
+
+def _sanitize_grade_cell(value: str, *, expand_ranges: bool) -> str:
+    """display_grade/grade_number must hold a real band, never a program label or bucket.
+
+    Blanks program/course labels ('AP') and grade buckets ('High School'); expands a
+    numeric range ('9-12' -> '9,10,11,12') for grade_number. Returns the cleaned value.
+    """
+    text = (value or "").strip()
+    if not text:
+        return ""
+    lowered = text.lower()
+    if lowered in PROGRAM_GRADE_LABELS or lowered in _GRADE_LEVEL_BUCKETS_LOWER:
+        return ""
+    if expand_ranges:
+        import re as _re
+
+        m = _re.fullmatch(r"\s*(\d{1,2})\s*-\s*(\d{1,2})\s*", text)
+        if m:
+            low, high = int(m.group(1)), int(m.group(2))
+            if low <= high and high - low <= 20:
+                return ",".join(str(n) for n in range(low, high + 1))
+    return text
+
+
+def _strip_structural_prefix(value: str) -> str:
+    """Remove a leading 'Unit N:'/'Topic N.N:'/etc. marker, keeping the real heading."""
+    text = (value or "").strip()
+    if not text:
+        return ""
+    stripped = _STRUCTURAL_PREFIX.sub("", text).strip()
+    return stripped or text  # never blank a heading to nothing
+
+
+def apply_row_guards(values: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+    """Deterministic quality guards on a row's internal-field values (fix + check).
+
+    Returns (fixed_values, unfixable_issues). Fixes what it safely can:
+    - display_grade / grade_number: drop program labels & buckets; expand grade_number ranges
+    - domain never empty: promote topic into domain (never the reverse)
+    - strip 'Unit N:'/'Topic N.N:' structural prefixes from domain/topic
+    Flags what it cannot fix:
+    - grade_level not mappable to Elementary/Middle/High School -> issue (caller flags NEEDS_REVIEW)
+    """
+    fixed = dict(values)
+    issues: list[str] = []
+
+    if "display_grade" in fixed:
+        fixed["display_grade"] = _sanitize_grade_cell(str(fixed.get("display_grade") or ""), expand_ranges=False)
+    if "grade_number" in fixed:
+        fixed["grade_number"] = _sanitize_grade_cell(str(fixed.get("grade_number") or ""), expand_ranges=True)
+
+    for key in ("domain", "topic"):
+        if key in fixed and isinstance(fixed.get(key), str):
+            fixed[key] = _strip_structural_prefix(fixed[key])
+
+    # domain must never be empty; topic may be. Promote topic -> domain (never reverse).
+    if "domain" in fixed and "topic" in fixed:
+        domain_val = str(fixed.get("domain") or "").strip()
+        topic_val = str(fixed.get("topic") or "").strip()
+        if not domain_val and topic_val:
+            fixed["domain"] = topic_val
+            fixed["topic"] = ""
+
+    # grade_level: coerce to an allowed bucket; flag if unmappable.
+    if "grade_level" in fixed:
+        raw = str(fixed.get("grade_level") or "").strip()
+        if raw:
+            mapped = normalize_grade_level(raw)
+            if mapped:
+                fixed["grade_level"] = mapped
+            else:
+                issues.append(
+                    f"grade_level '{raw}' is not one of Elementary School / Middle School / High School "
+                    "and could not be mapped."
+                )
+
+    return fixed, issues
+
+
 def normalize_grade_level(value: str | None) -> str | None:
     if not value or not isinstance(value, str):
         return None
