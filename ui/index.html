@@ -3,13 +3,13 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Curriculum Data Transformation</title>
+    <title>SOT: Extraction &amp; Review</title>
     <link rel="stylesheet" href="/styles.css">
   </head>
   <body>
     <div class="page-shell">
       <header class="hero">
-        <h1>Curriculum Data Transformation</h1>
+        <h1>SOT: Extraction &amp; Review</h1>
       </header>
 
       <main class="layout">
@@ -27,49 +27,40 @@
 
             <div id="extractionTab" class="tab-pane">
 
-            <p id="batchNameDisplay" class="inline-note" hidden></p>
+            <label class="field file-field">
+              <span>Source doc</span>
+              <input id="documentFiles" type="file" multiple accept=".pdf,.docx">
+            </label>
 
             <label class="field file-field">
-              <span>Source documents</span>
-              <input id="documentFiles" type="file" multiple accept=".pdf,.docx,.doc">
-            </label>
-            <div id="documentList" class="chip-list"></div>
-
-            <label class="field file-field">
-              <span>Sample CSV <span class="optional-tag">(optional)</span></span>
-              <input id="sampleCsvFile" type="file" accept=".csv">
-            </label>
-            <div id="sampleCsvLabel" class="inline-note">No sample CSV selected yet.</div>
-
-            <label class="field">
               <span>Source URLs</span>
-              <textarea id="sourceUrls" rows="3" placeholder="One curriculum/document URL per line (https://...). Used instead of or alongside uploaded files."></textarea>
+              <textarea id="sourceUrls" rows="3"></textarea>
+            </label>
+
+            <label class="field file-field">
+              <span>Sample CSV</span>
+              <input id="sampleCsvFile" type="file" accept=".csv">
             </label>
 
             <label class="field">
               <span>Sample Instructions <em>(optional)</em></span>
-              <textarea id="instructions" rows="4" placeholder="Optional: describe the target CSV columns or any extraction rules. Leave blank to use the default schema."></textarea>
-            </label>
-
-            <label class="field">
-              <span>Programs to extract <span class="optional-tag">(optional)</span></span>
-              <textarea id="programFilter" rows="2" placeholder="When a source URL is an index page listing many programs, limit extraction to these. One term per line or comma-separated (program name or code, e.g. Automotive, 9514000). Leave blank to extract all."></textarea>
+              <textarea
+                id="instructions"
+                rows="4"
+                placeholder="Optional: describe the target CSV columns or any extraction rules. Leave blank to use the default schema."
+              ></textarea>
             </label>
 
             <div class="button-row">
-              <button id="generateDraftButton" class="primary">Generate Draft Sample CSV</button>
-              <button id="approveDraftButton" class="accent" hidden>Approve Draft</button>
-              <button id="runExtractionButton">Run Extraction</button>
+              <button id="generateDraftButton" class="primary">Generate sample</button>
+              <button id="approveDraftButton" class="accent" hidden>Approve sample</button>
+              <button id="runExtractionButton">Extract</button>
             </div>
-
-            <p class="hint">
-              If you do not provide a sample CSV, the app creates one first and waits for your approval before extraction.
-            </p>
             </div>
 
             <div id="reviewTab" class="tab-pane" hidden>
               <div class="review-mode-toggle" role="tablist">
-                <button id="reviewModeBatch" class="tab-button active" role="tab" aria-selected="true">In-app csv</button>
+                <button id="reviewModeBatch" class="tab-button active" role="tab" aria-selected="true">In-app CSV</button>
                 <button id="reviewModeExternal" class="tab-button" role="tab" aria-selected="false">External CSV</button>
               </div>
 
@@ -78,7 +69,6 @@
                   <span>Extracted subject</span>
                   <select id="reviewBatchSelect" class="select-input"><option value="">Loading…</option></select>
                 </label>
-                <div class="inline-note">Reviewed against the source(s) this app recorded during extraction — no upload needed.</div>
               </div>
 
               <div id="reviewExternalMode" hidden>
@@ -86,39 +76,37 @@
                   <span>CSV to review</span>
                   <input id="reviewCsvFile" type="file" accept=".csv">
                 </label>
-                <div id="reviewCsvLabel" class="inline-note">No CSV selected yet.</div>
 
                 <label class="field file-field">
                   <span>Source document</span>
-                  <input id="reviewSourceFile" type="file" accept=".pdf,.docx,.doc">
+                  <input id="reviewSourceFile" type="file" accept=".pdf,.docx">
                 </label>
-                <div id="reviewSourceLabel" class="inline-note">No source document selected yet.</div>
 
                 <label class="field">
-                  <span>— or source URL —</span>
-                  <textarea id="reviewSourceUrl" rows="2" placeholder="One source document/page URL (https://...). Used if no source file is uploaded."></textarea>
+                  <span>Source URL</span>
+                  <textarea id="reviewSourceUrl" rows="2"></textarea>
                 </label>
               </div>
 
               <label class="field">
-                <span>Instructions before review <span class="optional-tag">(optional)</span></span>
-                <textarea id="reviewInstructions" rows="2" placeholder="Optional: guidance for the reviewer itself (e.g. 'this CSV intentionally omits grade columns, don't flag that', 'focus on description accuracy'). Shapes what gets flagged."></textarea>
+                <span>Instructions before review</span>
+                <textarea id="reviewInstructions" rows="2"></textarea>
               </label>
 
               <div class="button-row">
-                <button id="reviewCsvButton" class="primary">Review against source</button>
+                <button id="reviewCsvButton" class="primary">Review</button>
               </div>
 
               <label class="field">
-                <span>Suggested improvements <span class="optional-tag">(optional)</span></span>
-                <textarea id="reviewSuggestions" rows="2" placeholder="Optional: changes to apply to the CSV when fixing (e.g. 'expand grade ranges', 'strip unit prefixes from Topic'). Applied where the source supports it."></textarea>
+                <span>Suggested improvements</span>
+                <textarea id="reviewSuggestions" rows="2"></textarea>
               </label>
 
-              <div id="reviewSummary" class="result-summary">No review yet. Upload a CSV and source to check it.</div>
+              <div id="reviewSummary" class="result-summary"></div>
               <div id="reviewFindings" class="review-findings"></div>
 
               <div id="reviewFixRow" class="button-row" hidden>
-                <button id="approveFixButton" class="accent">Approve &amp; fix flagged rows</button>
+                <button id="approveFixButton" class="accent">Approve &amp; fix</button>
                 <button id="downloadFixedButton" class="ghost" hidden>Download Fixed CSV</button>
               </div>
               <div id="reviewFixSummary" class="result-summary" hidden></div>
@@ -131,27 +119,16 @@
             </div>
             <div class="sample-preview-card">
               <div class="sheet-preview-shell">
-                <div class="sheet-toolbar">
-                  <div id="samplePreviewTitle" class="sheet-title"></div>
-                  <div class="sheet-toolbar-actions">
-                    <span id="previewPill" class="sheet-pill">CSV import</span>
-                    <span id="samplePreviewMeta" class="sheet-toolbar-meta">No sample preview yet.</span>
-                  </div>
-                </div>
                 <div class="sheet-formula-bar">
                   <div id="samplePreviewCellRef" class="sheet-cell-ref">A1</div>
                   <div class="sheet-fx">fx</div>
-                  <div id="samplePreviewFormula" class="sheet-formula-value">No sample preview yet.</div>
+                  <div id="samplePreviewFormula" class="sheet-formula-value"></div>
                 </div>
-                <div id="samplePreviewTableWrap" class="sheet-grid empty-state">No sample preview yet.</div>
+                <div id="samplePreviewTableWrap" class="sheet-grid empty-state"></div>
               </div>
             </div>
-            <label class="field sheet-link-field">
-              <span>Google Sheet link <span class="optional-tag">(for sync)</span></span>
-              <input id="sheetLinkInput" type="text" placeholder="Paste a Google Sheet link or ID. Stays linked until you change it.">
-            </label>
             <div class="button-row preview-action-row">
-              <button id="syncFinalButton" class="accent" disabled>Sync to Sheets</button>
+              <button id="downloadFinalButton" class="accent" disabled>Download CSV</button>
             </div>
             <div id="resultSummary" class="result-summary">No results yet. Run an extraction to see output here.</div>
             <div id="actionBox" class="action-status"></div>
@@ -159,21 +136,12 @@
           </section>
         </div>
 
-        <div class="layout-bottom">
-          <aside class="panel panel-sidebar">
-            <div class="section-head">
-              <h2>Recent Batches</h2>
-              <button id="reloadBatchesButton" class="ghost">Reload</button>
-            </div>
-            <div id="batchList" class="batch-list"></div>
-          </aside>
-        </div>
       </main>
 
       <div class="hidden-support">
-        <textarea id="sampleCsvEditor" rows="12" placeholder="The generated sample CSV will appear here. You can edit it before approval."></textarea>
-        <code id="samplePathBox">No sample yet.</code>
-        <code id="schemaPathBox">No schema yet.</code>
+        <textarea id="sampleCsvEditor" rows="12"></textarea>
+        <code id="samplePathBox"></code>
+        <code id="schemaPathBox"></code>
       </div>
     </div>
 

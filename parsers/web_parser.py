@@ -32,7 +32,7 @@ _NAVIGATION_HEADERS = {
     "Sec-Fetch-Site": "same-origin",
     "Upgrade-Insecure-Requests": "1",
 }
-_DOCUMENT_LINK_SUFFIXES = (".rtf", ".pdf", ".docx", ".doc")
+_DOCUMENT_LINK_SUFFIXES = (".pdf", ".docx")
 # Non-curriculum documents that commonly sit alongside a real syllabus link and
 # must not be mistaken for index entries (mirrors batch_runner's link ranking).
 _INDEX_NOISE_KEYWORDS = (
@@ -177,7 +177,7 @@ def harvest_index_documents(
     filename_for: "Callable[[str, str, int], str] | None" = None,
     program_filter: list[str] | None = None,
 ) -> list[HarvestedDocument]:
-    """Harvest linked documents (.rtf/.pdf/.doc/.docx) from an index page.
+    """Harvest linked documents (.pdf/.docx) from an index page.
 
     Some sites (e.g. fldoe.org curriculum frameworks) list many programs as
     separate downloadable documents on one landing page, and sit behind edge

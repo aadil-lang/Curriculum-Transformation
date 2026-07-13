@@ -33,8 +33,8 @@ LOGGER = logging.getLogger(__name__)
 
 CHAT_BATCH_OUTPUT_DIR = ROOT_DIR / "output" / "chat_batches"
 URL_PATTERN = re.compile(r"^https?://", re.IGNORECASE)
-DOWNLOADABLE_REMOTE_SUFFIXES = {".pdf", ".docx", ".doc", ".rtf", ".csv"}
-DIRECT_DOCUMENT_SUFFIXES = {".pdf", ".docx", ".doc", ".rtf"}
+DOWNLOADABLE_REMOTE_SUFFIXES = {".pdf", ".docx", ".csv"}
+DIRECT_DOCUMENT_SUFFIXES = {".pdf", ".docx"}
 MANIFEST_SOURCE_COLUMN_NAMES = ("source", "source_url", "document_url", "pdf_url", "url")
 MIN_SAMPLE_ROWS = 10
 MAX_SAMPLE_ROWS = 30
@@ -52,6 +52,10 @@ class ChatBatchSpec(BaseModel):
     input_files: list[str]
     sample_csv: str | None = None
     instructions: str | None = None
+    # Free-text user guidance for the sample/extraction LLM (the "Sample Instructions" box).
+    # Unlike `instructions` (which triggers a schema-from-scratch build), this is injected as
+    # guidance into the prompt while a schema/sample contract is still in force.
+    sample_instructions: str | None = None
     infer_schema: bool = False
     draft_only: bool = False
     sample_row_target: int | None = None
@@ -217,6 +221,10 @@ def _run_single_batch(
         )
 
     batch_settings = create_model_settings(settings, schema_path)
+    if batch.sample_instructions:
+        from dataclasses import replace as _replace
+
+        batch_settings = _replace(batch_settings, sample_instructions=batch.sample_instructions)
     region_override = ExtractionRegion.model_validate(batch.extraction_region) if batch.extraction_region else None
     pipeline = (
         pipeline_factory(batch_settings, runtime_paths)
@@ -333,17 +341,11 @@ def create_model_settings(settings: Settings, schema_path: Path) -> Settings:
         extraction_citations_enabled=settings.extraction_citations_enabled,
         enable_region_targeting=settings.enable_region_targeting,
         schema_config_path=schema_path,
+        sample_instructions=settings.sample_instructions,
         portkey_api_key=settings.portkey_api_key,
         gemini_api_key=settings.gemini_api_key,
         openai_api_key=settings.openai_api_key,
         anthropic_api_key=settings.anthropic_api_key,
-        google_sheets_sync_enabled=settings.google_sheets_sync_enabled,
-        google_sheets_spreadsheet_id=settings.google_sheets_spreadsheet_id,
-        google_sheets_sheet_name=settings.google_sheets_sheet_name,
-        google_service_account_json=settings.google_service_account_json,
-        google_service_account_json_path=settings.google_service_account_json_path,
-        google_oauth_client_secret_path=settings.google_oauth_client_secret_path,
-        google_oauth_token_path=settings.google_oauth_token_path,
     )
 
 
@@ -775,6 +777,11 @@ def _run_sample_extraction_draft(
     from parsers.router import parse_input
 
     batch_settings = create_model_settings(settings, schema_path)
+    # Carry the user's sample instructions into the engine settings so the draft prompt
+    # can honor them (create_model_settings copies from the shared settings, which do not
+    # know about this batch's instructions).
+    if batch.sample_instructions:
+        batch_settings = replace(batch_settings, sample_instructions=batch.sample_instructions)
     # Use the dedicated draft model/provider when configured; otherwise the main
     # extractor model. The whole draft path (locate, analysis, extraction) runs
     # through the engine's settings, so overriding the extractor fields is enough.
@@ -1606,7 +1613,7 @@ class _DocumentLinkParser(html.parser.HTMLParser):
     def _looks_like_document_link(url: str, attributes: dict[str, str]) -> bool:
         lowered_url = url.lower()
         path_only = urllib.parse.urlparse(lowered_url).path
-        if path_only.endswith((".pdf", ".docx", ".doc", ".rtf")):
+        if path_only.endswith((".pdf", ".docx")):
             return True
         type_attr = attributes.get("type", "").lower()
         if any(marker in type_attr for marker in ("pdf", "msword", "wordprocessingml")):

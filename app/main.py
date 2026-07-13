@@ -83,15 +83,18 @@ def _create_app() -> FastAPI:
             return HTMLResponse(content=text.decode("utf-8"))
         return Response(content=body, media_type=content_type, headers={"Cache-Control": "no-store"})
 
+    @app.get("/", response_class=HTMLResponse)
     @app.get(f"{BASE_PREFIX}/", response_class=HTMLResponse)
     @app.get(BASE_PREFIX, response_class=HTMLResponse)
     def index() -> Response:
         return _serve_static("index.html")
 
+    @app.get("/styles.css")
     @app.get(f"{BASE_PREFIX}/styles.css")
     def styles() -> Response:
         return _serve_static("styles.css")
 
+    @app.get("/app.js")
     @app.get(f"{BASE_PREFIX}/app.js")
     def appjs() -> Response:
         return _serve_static("app.js")
@@ -103,18 +106,22 @@ def _create_app() -> FastAPI:
         return {"success": True, "data": {"status": "ok", "service": "data-transformation-agent"}}
 
     # --- Read endpoints ----------------------------------------------------
+    @app.get("/api/status")
     @app.get(f"{BASE_PREFIX}/api/status")
     def status() -> JSONResponse:
         return JSONResponse(content={"batches": ui_server.list_batch_summaries()})
 
+    @app.get("/api/workspace")
     @app.get(f"{BASE_PREFIX}/api/workspace")
     def workspace() -> JSONResponse:
         return JSONResponse(content=ui_server.load_workspace_summary(settings))
 
+    @app.get("/api/review-batches")
     @app.get(f"{BASE_PREFIX}/api/review-batches")
     def review_batches() -> JSONResponse:
         return JSONResponse(content={"batches": ui_server._reviewable_batches()})
 
+    @app.get("/api/batches/{batch_name}")
     @app.get(f"{BASE_PREFIX}/api/batches/{{batch_name}}")
     def batch_detail(batch_name: str) -> JSONResponse:
         try:
@@ -123,38 +130,42 @@ def _create_app() -> FastAPI:
             return _client_error(exc)
 
     # --- Action endpoints --------------------------------------------------
+    @app.post("/api/draft-sample")
     @app.post(f"{BASE_PREFIX}/api/draft-sample")
     async def draft_sample(request: Request) -> JSONResponse:
         return _run(ui_server.handle_draft_sample, await request.json())
 
+    @app.post("/api/approve-sample")
     @app.post(f"{BASE_PREFIX}/api/approve-sample")
     async def approve_sample(request: Request) -> JSONResponse:
         return _run(ui_server.handle_approve_sample, await request.json())
 
+    @app.post("/api/run-extraction")
     @app.post(f"{BASE_PREFIX}/api/run-extraction")
     async def run_extraction(request: Request) -> JSONResponse:
         return _run(ui_server.handle_run_extraction, await request.json())
 
+    @app.post("/api/audit-batch")
     @app.post(f"{BASE_PREFIX}/api/audit-batch")
     async def audit_batch(request: Request) -> JSONResponse:
         return _run(ui_server.handle_audit_batch, await request.json())
 
-    @app.post(f"{BASE_PREFIX}/api/sync-batch")
-    async def sync_batch(request: Request) -> JSONResponse:
-        return _run(ui_server.handle_sync_batch, await request.json())
-
+    @app.post("/api/review-csv")
     @app.post(f"{BASE_PREFIX}/api/review-csv")
     async def review_csv(request: Request) -> JSONResponse:
         return _run(ui_server.handle_review_csv, await request.json())
 
+    @app.post("/api/fix-reviewed-csv")
     @app.post(f"{BASE_PREFIX}/api/fix-reviewed-csv")
     async def fix_reviewed_csv(request: Request) -> JSONResponse:
         return _run(ui_server.handle_fix_reviewed_csv, await request.json())
 
+    @app.post("/api/review-batch")
     @app.post(f"{BASE_PREFIX}/api/review-batch")
     async def review_batch(request: Request) -> JSONResponse:
         return _run(ui_server.handle_review_batch, await request.json())
 
+    @app.post("/api/fix-reviewed-batch")
     @app.post(f"{BASE_PREFIX}/api/fix-reviewed-batch")
     async def fix_reviewed_batch(request: Request) -> JSONResponse:
         return _run(ui_server.handle_fix_reviewed_batch, await request.json())

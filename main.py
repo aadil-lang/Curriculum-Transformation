@@ -18,7 +18,6 @@ from batch_runner import (
 from config import DEFAULT_SCHEMA_CONFIG_PATH, INPUT_DIR, OUTPUT_DIR, ROOT_DIR, Settings, ensure_directories, get_runtime_paths, get_settings, setup_logging
 from csv_audit import audit_extracted_csv
 from csv_finalization import finalize_extracted_csv
-from google_sheets_sync import authorize_google_sheets_user
 from pipeline import DataTransformationPipeline
 from schemas import csv_headers, load_schema_config
 from ui_server import list_batch_summaries, serve_ui
@@ -82,9 +81,6 @@ def run_once_command(settings: Settings) -> int:
         finalization_result = json.loads(
             pipeline.runtime_paths.csv_finalization_status_path.read_text(encoding="utf-8")
         )
-    sync_result = {}
-    if pipeline.runtime_paths.sheet_sync_status_path.exists():
-        sync_result = json.loads(pipeline.runtime_paths.sheet_sync_status_path.read_text(encoding="utf-8"))
     print(
         json.dumps(
             {
@@ -98,7 +94,6 @@ def run_once_command(settings: Settings) -> int:
                     for result in results
                 ],
                 "csv_finalization": finalization_result,
-                "google_sheets_sync": sync_result,
             },
             indent=2,
         )
@@ -118,7 +113,6 @@ def status_command() -> int:
     review_dir = OUTPUT_DIR / "transformation_reviews"
     audit_dir = OUTPUT_DIR / "csv_audits"
     finalization_status_path = OUTPUT_DIR / "csv_finalization_status.json"
-    sheet_sync_status_path = OUTPUT_DIR / "google_sheets_sync_status.json"
 
     input_files = sorted(path.name for path in INPUT_DIR.iterdir() if path.is_file())
     manual_review_entries = []
@@ -132,10 +126,6 @@ def status_command() -> int:
     default_schema_source = {}
     if DEFAULT_SCHEMA_SOURCE_PATH.exists():
         default_schema_source = json.loads(DEFAULT_SCHEMA_SOURCE_PATH.read_text(encoding="utf-8"))
-
-    google_sheets_sync = {}
-    if sheet_sync_status_path.exists():
-        google_sheets_sync = json.loads(sheet_sync_status_path.read_text(encoding="utf-8"))
 
     csv_finalization = {}
     if finalization_status_path.exists():
@@ -177,18 +167,6 @@ def status_command() -> int:
             "final_output": {
                 "path": str(final_csv_path),
                 "exists": final_csv_path.exists(),
-            },
-            "google_sheets_delivery": {
-                "enabled": bool(settings.google_sheets_sync_enabled),
-                "spreadsheet_id_present": bool(settings.google_sheets_spreadsheet_id),
-                "service_account_present": bool(
-                    settings.google_service_account_json or settings.google_service_account_json_path
-                ),
-                "oauth_client_secret_present": bool(settings.google_oauth_client_secret_path),
-                "oauth_token_present": Path(settings.google_oauth_token_path).expanduser().exists(),
-                "oauth_token_path": settings.google_oauth_token_path,
-                "status_path": str(sheet_sync_status_path),
-                "last_sync": google_sheets_sync,
             },
             "csv_finalization": {
                 "status_path": str(finalization_status_path),
@@ -314,50 +292,6 @@ def audit_csv_command(args: argparse.Namespace, settings: Settings) -> int:
     )
     print(json.dumps(asdict(result), indent=2))
     return 0
-
-
-def sync_sheet_command(args: argparse.Namespace, settings: Settings) -> int:
-    ensure_directories()
-    csv_path = Path(args.csv).expanduser().resolve() if args.csv else OUTPUT_DIR / "final_extracted_data.csv"
-    active_settings = _resolve_settings_for_csv(csv_path, settings)
-    runtime_paths = _resolve_runtime_paths_for_csv(csv_path)
-    result = finalize_extracted_csv(
-        csv_path,
-        active_settings,
-        runtime_paths,
-        sync_to_sheets=True,
-        audit_before_sync=not args.sample,
-    )
-    print(json.dumps(asdict(result), indent=2))
-    return 0
-
-
-def google_oauth_login_command(args: argparse.Namespace, settings: Settings) -> int:
-    ensure_directories()
-    result = authorize_google_sheets_user(
-        settings,
-        client_secret_path=args.client_secret,
-        open_browser=not args.no_browser,
-        port=args.port,
-    )
-    print(json.dumps(asdict(result), indent=2))
-    return 0
-
-
-def _resolve_settings_for_csv(csv_path: Path, settings: Settings) -> Settings:
-    schema_path = csv_path.parent / "schema_config.json"
-    if schema_path.exists():
-        return create_model_settings(settings, schema_path)
-    return settings
-
-
-def _resolve_runtime_paths_for_csv(csv_path: Path):
-    schema_path = csv_path.parent / "schema_config.json"
-    if schema_path.exists() and csv_path.parent.name == "output":
-        return get_runtime_paths(csv_path.parent.parent)
-    return get_runtime_paths()
-
-
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Autonomous Data Transformation Agent")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -371,13 +305,6 @@ def build_parser() -> argparse.ArgumentParser:
     audit_csv = subparsers.add_parser("audit-csv", help="Audit an extracted CSV against its source documents and the active sample contract.")
     audit_csv.add_argument("--audit-csv", required=True, help="Path to the extracted CSV to audit.")
     audit_csv.add_argument("--sample-csv", help="Optional sample CSV to use as the audit contract instead of the workspace default schema.")
-    sync_sheet = subparsers.add_parser("sync-sheet", help="Sync a CSV to Google Sheets only when you explicitly run this command. Full extracted CSVs are audited first; approved sample CSVs can use --sample.")
-    sync_sheet.add_argument("--csv", help="Optional path to the CSV to sync. Defaults to output/final_extracted_data.csv.")
-    sync_sheet.add_argument("--sample", action="store_true", help="Treat the CSV as an approved sample and sync it without running the full extracted-CSV audit.")
-    oauth_login = subparsers.add_parser("google-oauth-login", help="Authorize Google Sheets sync using a Google OAuth client secret.")
-    oauth_login.add_argument("--client-secret", help="Optional path to the OAuth client secret JSON.")
-    oauth_login.add_argument("--no-browser", action="store_true", help="Print the authorization URL instead of opening a browser automatically.")
-    oauth_login.add_argument("--port", type=int, default=8787, help="Local callback port for the OAuth flow. Default: 8787.")
     subparsers.add_parser("run-once", help="Process all currently pending documents one time.")
     subparsers.add_parser("watch", help="Continuously monitor input_documents for new files.")
     ui_parser = subparsers.add_parser("ui", help="Start the local workspace UI.")
@@ -420,10 +347,6 @@ def main() -> int:
         return offline_verify_command()
     if args.command == "audit-csv":
         return audit_csv_command(args, settings)
-    if args.command == "sync-sheet":
-        return sync_sheet_command(args, settings)
-    if args.command == "google-oauth-login":
-        return google_oauth_login_command(args, settings)
     if args.command == "run-once":
         return run_once_command(settings)
     if args.command == "watch":

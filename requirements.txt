@@ -1,5 +1,4 @@
 # Python packages only. Two system tools are also required (not pip-installable):
-#   - LibreOffice (soffice)  -> legacy .doc parsing;  brew install --cask libreoffice
 #   - Playwright browsers    -> web scraping via crawl4ai;  run `crawl4ai-setup` after install
 #   - Tesseract OCR          -> scanned PDF fallback;  brew install tesseract tesseract-lang
 crawl4ai>=0.4.247
@@ -9,9 +8,6 @@ pydantic>=2.8.2
 instructor>=1.3.7
 pandas>=2.2.2
 google-genai>=1.28.0
-google-api-python-client>=2.154.0
-google-auth>=2.35.0
-google-auth-oauthlib>=1.2.1
 openai>=1.40.0
 anthropic>=0.34.2
 portkey-ai>=1.12.0

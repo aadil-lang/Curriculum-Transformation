@@ -1,10 +1,8 @@
 FROM python:3.12-slim
 
 # --- System tools that pip cannot install ---
-# libreoffice-writer: converts legacy .doc syllabuses to .docx for parsing (soffice --headless).
-# The rest are the shared libraries headless Chromium (Playwright/Crawl4AI) needs on a minimal image.
+# Shared libraries headless Chromium (Playwright/Crawl4AI) needs on a minimal image.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        libreoffice-writer \
         ca-certificates \
         fonts-liberation \
     && rm -rf /var/lib/apt/lists/*

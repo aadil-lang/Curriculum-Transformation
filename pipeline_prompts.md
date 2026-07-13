@@ -575,7 +575,7 @@ Key job types:
 | `draft_sample` | Produce 6–10 real sample rows in `sample_output_template.csv` |
 | `run_extraction` | Full extraction using approved sample as contract |
 | `audit_batch` | Audit extracted CSV against sources and sample contract |
-| `sync_sample` / `sync_final` | Push to Google Sheets when explicitly queued |
+| `download_csv` | Deliver the finalized CSV artifact for review or download |
 
 Column-meaning inference order for Codex worker:
 

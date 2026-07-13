@@ -47,9 +47,9 @@ os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", str(PLAYWRIGHT_BROWSERS_DIR))
 
 
 # Cross-cloud failover targets for a stage, as "provider|model,provider|model".
-# Vertex Gemini models use bare ids (gemini-3.5-flash); Azure OpenAI uses gpt-4o, etc.
-DEFAULT_EXTRACTOR_FALLBACKS = "@azure-openai-bbfaac|gpt-4o"
-DEFAULT_CRITIC_FALLBACKS = "@swedencentral-anthropic|claude-3-5-sonnet-20240620"
+# Empty by default so Gemini-only runs never spill onto Azure OpenAI / Claude / Bedrock.
+DEFAULT_EXTRACTOR_FALLBACKS = ""
+DEFAULT_CRITIC_FALLBACKS = ""
 
 
 def parse_provider_fallbacks(raw: str) -> list[tuple[str, str]]:
@@ -113,7 +113,11 @@ class Settings:
         default_factory=lambda: max(1, int(os.getenv("LLM_MAX_CONCURRENCY", "4")))
     )
     extraction_max_chars_per_chunk: int = field(
-        default_factory=lambda: max(4000, int(os.getenv("EXTRACTION_MAX_CHARS_PER_CHUNK", "120000")))
+        # 25k keeps each extraction call small enough to finish well under the request timeout.
+        # 120k made a single call try to emit hundreds of rows, hitting the 300s timeout and
+        # stalling on large curricula (e.g. a 465-row AP doc). Smaller chunks also run in
+        # parallel up to llm_max_concurrency, so it is faster AND more reliable.
+        default_factory=lambda: max(4000, int(os.getenv("EXTRACTION_MAX_CHARS_PER_CHUNK", "25000")))
     )
     request_timeout_seconds: float = field(
         default_factory=lambda: max(30.0, float(os.getenv("REQUEST_TIMEOUT_SECONDS", "300")))
@@ -177,22 +181,14 @@ class Settings:
     schema_config_path: Path = field(
         default_factory=lambda: Path(os.getenv("SCHEMA_CONFIG_PATH", str(DEFAULT_SCHEMA_CONFIG_PATH)))
     )
+    # Free-text guidance the user typed in the "Sample Instructions" box. Injected into the
+    # extraction/draft LLM prompt so the model understands the desired sample while creating
+    # it. Set per-batch in code (not env-driven); empty means no extra guidance.
+    sample_instructions: str = ""
     portkey_api_key: str | None = field(default_factory=lambda: os.getenv("PORTKEY_API_KEY"))
     gemini_api_key: str | None = field(default_factory=lambda: os.getenv("GEMINI_API_KEY"))
     openai_api_key: str | None = field(default_factory=lambda: os.getenv("OPENAI_API_KEY"))
     anthropic_api_key: str | None = field(default_factory=lambda: os.getenv("ANTHROPIC_API_KEY"))
-    google_sheets_sync_enabled: bool = field(
-        default_factory=lambda: os.getenv("GOOGLE_SHEETS_SYNC_ENABLED", "1").strip().lower() not in {"0", "false", "no", ""}
-    )
-    google_sheets_spreadsheet_id: str | None = field(default_factory=lambda: os.getenv("GOOGLE_SHEETS_SPREADSHEET_ID"))
-    google_sheets_sheet_name: str = field(default_factory=lambda: os.getenv("GOOGLE_SHEETS_SHEET_NAME", "Sheet1"))
-    google_service_account_json: str | None = field(default_factory=lambda: os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON"))
-    google_service_account_json_path: str | None = field(default_factory=lambda: os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON_PATH"))
-    google_oauth_client_secret_path: str | None = field(default_factory=lambda: os.getenv("GOOGLE_OAUTH_CLIENT_SECRET_PATH"))
-    google_oauth_token_path: str = field(
-        default_factory=lambda: os.getenv("GOOGLE_OAUTH_TOKEN_PATH", str(RUNTIME_DIR / "google_oauth_token.json"))
-    )
-
     def __post_init__(self) -> None:
         if self.execution_mode not in SUPPORTED_EXECUTION_MODES:
             supported = ", ".join(sorted(SUPPORTED_EXECUTION_MODES))
@@ -212,7 +208,6 @@ class RuntimePaths:
     manual_review_path: Path
     final_csv_path: Path
     csv_finalization_status_path: Path
-    sheet_sync_status_path: Path
     log_path: Path
     monitor_status_path: Path
     playwright_browsers_dir: Path
@@ -247,7 +242,6 @@ def get_runtime_paths(root_dir: Path | None = None) -> RuntimePaths:
             manual_review_path=MANUAL_REVIEW_PATH,
             final_csv_path=FINAL_CSV_PATH,
             csv_finalization_status_path=OUTPUT_DIR / "csv_finalization_status.json",
-            sheet_sync_status_path=OUTPUT_DIR / "google_sheets_sync_status.json",
             log_path=LOG_PATH,
             monitor_status_path=MONITOR_STATUS_PATH,
             playwright_browsers_dir=PLAYWRIGHT_BROWSERS_DIR,
@@ -278,7 +272,6 @@ def get_runtime_paths(root_dir: Path | None = None) -> RuntimePaths:
         manual_review_path=output_dir / "manual_review.json",
         final_csv_path=output_dir / "final_extracted_data.csv",
         csv_finalization_status_path=output_dir / "csv_finalization_status.json",
-        sheet_sync_status_path=output_dir / "google_sheets_sync_status.json",
         log_path=output_dir / "agent.log",
         monitor_status_path=output_dir / "monitor_status.json",
         playwright_browsers_dir=playwright_browsers_dir,

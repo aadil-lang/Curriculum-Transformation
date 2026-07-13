@@ -87,6 +87,7 @@ class DataTransformationPipeline:
         self._state_lock = Lock()
         self._manual_review_lock = Lock()
         self._monitor_status_lock = Lock()
+        self._progress_lock = Lock()
 
     def process_pending_documents(self) -> list[ProcessResult]:
         self._refresh_runtime_config()
@@ -98,6 +99,8 @@ class DataTransformationPipeline:
         candidate_paths = [path for path in paths if not self._already_processed(path)]
         if not candidate_paths:
             return []
+
+        self._write_progress("starting", "Preparing extraction")
 
         results: list[ProcessResult] = []
         max_workers = min(self.settings.extraction_max_workers, len(candidate_paths))
@@ -145,6 +148,7 @@ class DataTransformationPipeline:
             schema_path, include_citations=self.settings.extraction_citations_enabled
         )
 
+        self._write_progress("parsing", f"Reading {path.name}")
         try:
             parsed_document = parse_input(path)
         except Exception as exc:
@@ -152,11 +156,17 @@ class DataTransformationPipeline:
             error_log_history.append(failure_message)
             self._log_manual_review(path, parsed_document, error_log_history, stage="parse")
             self._mark_processed(path, "manual_review", error_log_history, retryable=False)
+            self._write_progress("failed", f"Could not read {path.name}", done=True)
             return ProcessResult(path=path, status="manual_review", message=failure_message, stage="parse")
 
         for attempt_number in range(self.settings.max_retries + 1):
             prior_error_log = "\n\n".join(error_log_history) if error_log_history else None
             try:
+                self._write_progress(
+                    "extracting",
+                    "Analyzing the document and extracting rows"
+                    + (f" (attempt {attempt_number + 1})" if attempt_number else ""),
+                )
                 extraction = self.extractor.extract(
                     parsed_document, prior_error_log=prior_error_log, region_override=self.region_override
                 )
@@ -189,6 +199,12 @@ class DataTransformationPipeline:
                         parsed_document.source_name,
                     )
 
+                self._write_progress(
+                    "reviewing",
+                    f"Extracted {extracted_count} rows ({coverage_status}); reviewing and validating",
+                    rows_done=extracted_count,
+                    rows_target=expected_total if expected_total and expected_total > 0 else None,
+                )
                 validated_rows, review_metadata_by_row, failed_rows = self._review_and_validate_rows(
                     extraction.payload_rows, parsed_document, extraction.planning, row_model
                 )
@@ -206,6 +222,13 @@ class DataTransformationPipeline:
                 if failed_rows:
                     self._log_failed_rows_manual_review(path, parsed_document, failed_rows)
                 self._mark_processed(path, "verified", error_log_history, retryable=False)
+                self._write_progress(
+                    "finalizing",
+                    f"Appended {len(all_rows)} rows; finalizing CSV",
+                    rows_done=len(all_rows),
+                    rows_target=expected_total if expected_total and expected_total > 0 else None,
+                    done=True,
+                )
                 message = f"Reviewed, validated, and appended {len(all_rows)} row(s) to CSV. Coverage: {coverage_status}."
                 if failed_rows:
                     message += f" {len(failed_rows)} row(s) flagged NEEDS_REVIEW."
@@ -231,6 +254,11 @@ class DataTransformationPipeline:
                     )
                     final_status = "pending_retry" if retryable else "manual_review"
                     self._mark_processed(path, final_status, error_log_history, retryable=retryable)
+                    self._write_progress(
+                        "failed",
+                        "Extraction failed; see manual review" if not retryable else "Waiting to retry",
+                        done=True,
+                    )
                     return ProcessResult(
                         path=path,
                         status=final_status,
@@ -508,14 +536,12 @@ class DataTransformationPipeline:
             self.runtime_paths.final_csv_path,
             self.settings,
             self.runtime_paths,
-            sync_to_sheets=False,
-            audit_before_sync=self.settings.run_final_audit,
+            audit_csv=self.settings.run_final_audit,
         )
         self.logger.info(
-            "CSV finalization status=%s audit_passed=%s sync_status=%s message=%s",
+            "CSV finalization status=%s audit_passed=%s message=%s",
             finalization_result.status,
             finalization_result.audit_passed,
-            finalization_result.sync_status,
             finalization_result.message,
         )
 
@@ -903,6 +929,36 @@ class DataTransformationPipeline:
     def _fingerprint(path: Path) -> str:
         return hashlib.sha256(path.read_bytes()).hexdigest()
 
+    def _write_progress(
+        self,
+        stage: str,
+        detail: str = "",
+        *,
+        rows_done: int | None = None,
+        rows_target: int | None = None,
+        done: bool = False,
+    ) -> None:
+        """Write a coarse live-progress marker for the UI to poll during a run.
+
+        Best-effort: a progress-write failure must never break extraction, so all
+        errors are swallowed. Written to the batch output dir as extraction_progress.json.
+        """
+        try:
+            path = self.runtime_paths.output_dir / "extraction_progress.json"
+            payload = {
+                "stage": stage,
+                "detail": detail,
+                "rows_done": rows_done,
+                "rows_target": rows_target,
+                "done": done,
+                "updated_at_utc": datetime.now(timezone.utc).isoformat(),
+            }
+            with self._progress_lock:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        except Exception:  # noqa: BLE001 - progress is cosmetic; never fail the run
+            pass
+
     def _write_monitor_status(
         self,
         status: str,
@@ -976,13 +1032,6 @@ class DataTransformationPipeline:
             gemini_api_key=refreshed_settings.gemini_api_key,
             openai_api_key=refreshed_settings.openai_api_key,
             anthropic_api_key=refreshed_settings.anthropic_api_key,
-            google_sheets_sync_enabled=refreshed_settings.google_sheets_sync_enabled,
-            google_sheets_spreadsheet_id=refreshed_settings.google_sheets_spreadsheet_id,
-            google_sheets_sheet_name=refreshed_settings.google_sheets_sheet_name,
-            google_service_account_json=refreshed_settings.google_service_account_json,
-            google_service_account_json_path=refreshed_settings.google_service_account_json_path,
-            google_oauth_client_secret_path=refreshed_settings.google_oauth_client_secret_path,
-            google_oauth_token_path=refreshed_settings.google_oauth_token_path,
         )
         if self._uses_default_extractor:
             self.extractor = ExtractionEngine(self.settings)

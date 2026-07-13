@@ -36,7 +36,7 @@ Fill the columns as follows:
 - `subject`: Use the main subject area or official parent subject name.
 - `domain`: Use the main subdivision under the subject. This should be a meaningful named grouping from the source, such as a discipline, framework section, or course-level grouping. Do not use a code here.
 - `topic`: Use the heading directly under `domain` for the row. This should be the actual named heading from the source, such as a strand, unit, organizer, or named cluster heading. Do not put generic labels like `Cluster 1.1` if the cluster has a real heading such as `Use of linguistic elements`. If the approved sample supports merged topic cells and one standard genuinely applies to multiple topics, merge those topic names into one cell using ` | `, for example `Topic A | Topic B`.
-- `l3`: Leave blank during sample preparation unless the user explicitly asks for this hierarchy level to be filled.
+- `l3`: Leave blank by default. Fill it only per the system prompt's COLUMN RULES (l3 rule): a code-less grouping heading only, never a coded standard — see the DECISIVE TEST there.
 - `l4`: Leave blank during sample preparation unless the user explicitly asks for this hierarchy level to be filled.
 - `l5`: Leave blank during sample preparation unless the user explicitly asks for this hierarchy level to be filled.
 - `Display standard code`: Put the visible code that should be shown in the sample row. This code may be taken directly from the source or formed from the source structure and sample pattern when needed. It does not have to be explicitly printed in the source, as long as the constructed code is consistent, defensible, and aligned with the approved sample style.
@@ -44,7 +44,7 @@ Fill the columns as follows:
   If the same source code appears in multiple places in the document, make it unique by prefixing a two-letter or three-letter domain code and a dot. In that case, use the structure `domaincode.originalcode`, for example `LC.1.1` or `CA.1.1`.
   If the approved sample supports prefixed or formed display codes, and repeated rows share the same description and the same raw display code, prefix a short domain code or topic code and a dot, whichever makes the display code unique, for example `DA.1.1` or `TOP.1.1`.
   If the source uses bullets instead of numbered codes, assign numeric sequence values to those bullets for `Display standard code` so each bullet becomes countable and unique.
-- `description`: Put the full standard, outcome, or expectation text for that row. Keep the meaning complete. Do not shorten unless the source itself is short. If the source description is multiline, preserve the full content and do not truncate it. If the source uses a parent-child pattern and the child item depends on the parent text for full meaning, merge the parent and child text into the same description cell.
+- `description`: Put the full standard, outcome, or expectation text for that row. Keep the meaning complete. Do not shorten unless the source itself is short. If the source description is multiline, preserve the full content and do not truncate it. For parent-child patterns, follow the parent-vs-child rule in the system prompt's COLUMN RULES (own row OR merged as `parent: child`, never both).
 - `Standard code`: Leave blank during sample preparation unless the user explicitly instructs that this column should be filled.
 - `czi_standard_code`: Leave blank unless the user explicitly provides or requests values for it.
 
@@ -65,7 +65,7 @@ Fill the columns as follows:
 - If a section uses bullets rather than numbered items, number the bullets in reading order and use those numbers to form `Display standard code`.
 - Do not invent hierarchy values just because the source has multiple levels.
 - Do not fill columns with code labels, cluster numbers, or structural markers when a real heading name is available.
-- If a parent heading and child bullet together form the real meaning of a row, merge them into one description rather than leaving the child fragment unsupported.
+- Coded parent standards and parent/child descriptions follow the system prompt's COLUMN RULES (l3 rule + parent-vs-child rule); do not restate or contradict them here.
 
 ## Column-Semantics Inference Rules
 
@@ -122,6 +122,6 @@ For every subject, perform the prompt reasoning in this order:
 
 ## Post-Extraction Delivery
 
-- After a CSV is fully extracted, transfer the finalized data to the linked Google Sheet.
-- Treat the completed CSV as the canonical extracted file first, then push the same finalized rows into Google Sheets.
-- Only transfer to Google Sheets after extraction is complete and ready for delivery.
+- After a CSV is fully extracted, save the finalized CSV as the delivery artifact for the run.
+- Treat the completed CSV as the canonical extracted file for review, download, and downstream use.
+- Only present the finalized CSV after extraction is complete and ready for delivery.

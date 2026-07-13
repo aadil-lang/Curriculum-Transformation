@@ -1100,6 +1100,17 @@ Source markdown:
         )
         planning_json = json.dumps(planning.model_dump(mode="json"), indent=2)
         source_markdown = markdown_override if markdown_override is not None else parsed_document.markdown
+        user_guidance = (self.settings.sample_instructions or "").strip()
+        user_guidance_block = (
+            (
+                "\n\nUSER SAMPLE INSTRUCTIONS (high priority — the human asked for these specifically; "
+                "follow them wherever the source supports it, overriding lower-priority defaults on conflict, "
+                "but never fabricate content the source lacks):\n"
+                f"{user_guidance}\n"
+            )
+            if user_guidance
+            else ""
+        )
         correction_block = (
             "No prior validation failures.\n"
             if not prior_error_log
@@ -1108,53 +1119,140 @@ Source markdown:
 
         citation_rules = (
             "Citations must be verbatim snippets copied from the source markdown. "
-            "If a value is absent, return null for the value and an empty string for its citation. "
-        )
-        system_prompt = (
-            "You are an adaptive data transformation agent. "
-            "Do not use static assumptions about layout. "
-            "Use the pre-extraction understanding artifact as the required plan before mapping content into the provided schema. "
-            "The provided sample CSV contract defines the transformation rules and output style; follow it strictly. "
-            "Infer subject-specific column meaning from the sample contract and source rather than hardcoding one hierarchy interpretation across subjects. "
-            "grade_level must be exactly one of: Elementary School, Middle School, High School."
-            "Description fields must preserve source meaning completely, without truncation, cross-row merges, "
-            "neighbor contamination, or forced flattening when multiline structure is meaningful. "
-            "Preserve mathematical symbols, equations, radicals, superscripts, subscripts, chemistry notation, "
-            "Greek letters, domain-specific notation, semantic punctuation, and multilingual text faithfully. "
-            "If notation looks degraded in native extraction, attempt a localized repair only when supported by the source. "
-            "Reject noise such as headers, footers, page numbers, continuation fragments, appendix-only noise, N.B. notes, "
-            "layout labels, and extraction artifacts unless the contract explicitly requires them. "
-            "When row_scope_rules or parsed progression-matrix placement hints are present, emit one output row per "
-            "(benchmark, marked option track) pair only — never duplicate a benchmark across CST, TS, and S unless each "
-            "track is explicitly marked. "
-            + (citation_rules if self.settings.extraction_citations_enabled else "")
-            + "Keep anchoring_plan short and field-specific. "
-            "Extract every valid row supported by the source and approved sample contract. "
-            "If the approved sample supports merged topic cells and one standard genuinely applies to multiple topics, merge those topic names into one topic cell using ' | ' rather than duplicating the row only for topic labels. "
-            "If the approved sample supports prefixed or formed display codes and the same raw display code repeats, prefix it with a short domain code or topic code plus a dot when that disambiguation is supported by the source structure. "
-            "Do not stop after the first row. "
-            "Do not omit valid domains, topics, or descriptions that belong in output. "
-            "Return payload_rows in source order with no duplicates and no missing supported rows. "
-            "grade_level must be exactly one of: Elementary School, Middle School, High School."
+            "If a value is absent, return null for the value and an empty string for its citation."
         )
 
+        # --- Shared, authoritative prompt sections (emitted for BOTH draft and full modes) ---
+        role_section = (
+            "# ROLE\n"
+            "You are an adaptive data transformation agent that maps source curriculum/standards "
+            "content into the provided schema. Do not use static assumptions about layout. The "
+            "approved sample CSV contract defines the transformation rules and output style for this "
+            "run; follow it strictly."
+        )
+
+        method_section = (
+            "# METHOD\n"
+            "1. Use the pre-extraction understanding artifact as the required plan before mapping any "
+            "content into the schema.\n"
+            "2. Infer subject-specific column meaning from the sample contract and the source; do not "
+            "hardcode one hierarchy interpretation across subjects. Once you infer what each column "
+            "means for this subject, apply it consistently to every row and do not drift."
+        )
+
+        # COLUMN RULES: the single authoritative statement of per-column behavior. These are the
+        # rules that were previously draft-only; they now apply to full extraction as well.
+        column_rules_section = (
+            "# COLUMN RULES (authoritative — apply to every row)\n"
+            "1. STRIP STRUCTURAL PREFIXES from domain and topic. Remove leading unit/topic/module/cluster "
+            "markers and their numbers, keeping only the real heading name. "
+            "'Unit 1: The Living World: Ecosystems' -> 'The Living World: Ecosystems'; "
+            "'Topic 1.1: Introduction to Ecosystems' -> 'Introduction to Ecosystems'. "
+            "Never leave a 'Unit N:', 'Topic N.N:', 'Module N:', or 'Cluster N.N' label in domain or topic "
+            "when a real heading name is present.\n"
+            "2. grade_level must be EXACTLY one of: Elementary School, Middle School, High School. Map any "
+            "source banding to the closest allowed label.\n"
+            "3. display_grade must be the DISPLAYED LEARNER GRADE BAND, expressed as a grade/year/stage — "
+            "NEVER the grade_level bucket and NEVER a program/course label. Do NOT put 'Elementary School' / "
+            "'Middle School' / 'High School' here, and do NOT put a course or program name such as 'AP', 'IB', "
+            "'Honors', 'Advanced Placement', 'GCSE', or 'A-Level' here — those name the course, not the grade. "
+            "Use an actual grade band such as 'K', '9', 'Year 12', 'Stage 4', or a range like '9-12'. When the "
+            "source only names a program/course (e.g. an AP or other senior secondary course) with no explicit "
+            "grade printed, use the grade band that course is taught at ('9-12' for AP and similar senior "
+            "secondary courses) — never the program name itself.\n"
+            "4. grade_number must be the SORTABLE grade value, never a text label like 'High School' and never a "
+            "program name like 'AP'. Expand ranges to a comma-separated sequence with NO spaces: "
+            "'9-12' -> '9,10,11,12'. If the source states no grade, derive it from the same band used for "
+            "display_grade (e.g. an AP course -> '9,10,11,12').\n"
+            "5. domain must NEVER be empty; topic MAY be empty. If the source has only ONE named grouping level "
+            "above the benchmark (no separate domain and topic), put that grouping in DOMAIN and leave TOPIC "
+            "empty — promote topic up into domain, never the reverse. Only fill topic when the source genuinely "
+            "has a second, finer grouping beneath domain. Do NOT invent a domain and do NOT duplicate the same "
+            "value into both domain and topic. If the approved sample supports merged topic cells and one "
+            "standard genuinely applies to multiple topics, merge those topic names into one topic cell using "
+            "' | ' rather than duplicating the row only for topic labels.\n"
+            "6. l3 is ONLY for a named GROUPING HEADING (a strand/cluster/organizer label) that sits between "
+            "topic and the benchmark AND has NO standard code and NO expectation text of its own. A PARENT "
+            "STANDARD is NOT a grouping level: if the level between topic and the benchmark carries its own "
+            "code and its own descriptive/expectation text (and child standards sit beneath it), it is a "
+            "STANDARD, not l3 — put its code in 'Display standard code' and its text in 'description' as its "
+            "OWN row. NEVER put a coded standard, its code, or its description into l3. "
+            "DECISIVE TEST: if the value begins with (or contains) a standard code such as 'ERT-1', 'ENG-1', "
+            "'EIN-2', 'STB-2', 'MS-LS1-1', 'HS.N.Q.1', it is a CODED STANDARD and MUST become its own row — it "
+            "may NOT go in l3. For example, an AP Enduring Understanding like 'ERT-1: Ecosystems are the result "
+            "of biotic and abiotic interactions.' is a coded parent standard: emit it as its own row (Display "
+            "standard code = 'ERT-1', description = 'Ecosystems are the result of biotic and abiotic "
+            "interactions.') and leave l3 EMPTY for it and its children. Only a heading with NO code (e.g. a "
+            "bare strand name like 'Ecosystems' printed as an organizer with no code) may go in l3. When in "
+            "doubt, leave l3 empty. Do NOT invent an l3.\n"
+            "7. PARENT vs CHILD descriptions: when you emit a coded parent standard as its OWN row, each child "
+            "row's description must contain ONLY the child's own text — do NOT prepend the parent statement to "
+            "it. Merge the parent text into a child's description as 'parent: child' ONLY when the parent is "
+            "NOT given its own row (so the child is not orphaned). Never do both — a parent statement should "
+            "appear either as its own row OR merged into its children, never repeated in both places.\n"
+            "8. Display standard code must be UNIQUE per row. If the approved sample supports prefixed or formed "
+            "display codes and the same raw display code repeats, prefix it with a short domain code or topic "
+            "code plus a dot when that disambiguation is supported by the source structure."
+        )
+
+        fidelity_section = (
+            "# FIDELITY\n"
+            "PRESERVE SOURCE CASING: copy every value verbatim from the source, keeping the ORIGINAL "
+            "capitalization exactly as written. Do NOT lowercase, uppercase, title-case, or otherwise "
+            "normalize letter case in description, topic, domain, subject, codes, or any other field. If the "
+            "source says 'In a predator-prey relationship', return 'In a predator-prey relationship' — never "
+            "'in a predator-prey relationship'.\n"
+            "Description fields must preserve source meaning completely, without truncation, cross-row merges, "
+            "neighbor contamination, or forced flattening when multiline structure is meaningful.\n"
+            "Preserve mathematical symbols, equations, radicals, superscripts, subscripts, chemistry notation, "
+            "Greek letters, domain-specific notation, semantic punctuation, and multilingual text faithfully. "
+            "If notation looks degraded in native extraction, attempt a localized repair only when supported by "
+            "the source.\n"
+            "Reject noise such as headers, footers, page numbers, continuation fragments, appendix-only noise, "
+            "N.B. notes, layout labels, and extraction artifacts unless the contract explicitly requires them."
+        )
+
+        row_formation_section = (
+            "# ROW FORMATION\n"
+            "Emit one output row per standard/benchmark. When row_scope_rules or parsed progression-matrix "
+            "placement hints are present, emit one output row per (benchmark, marked option track) pair only — "
+            "never duplicate a benchmark across CST, TS, and S unless each track is explicitly marked."
+        )
+
+        output_section = (
+            "# OUTPUT\n"
+            "Return payload_rows in source reading order, one object per output row, with no duplicates and no "
+            "missing supported rows. Do not stop after the first row. Do not omit valid domains, topics, or "
+            "descriptions that belong in output. Keep anchoring_plan short and field-specific."
+            + (" " + citation_rules if self.settings.extraction_citations_enabled else "")
+        )
+
+        user_instructions_section = (
+            "# USER INSTRUCTIONS (highest priority)\n"
+            "The user has provided explicit sample instructions (shown in the user message). Treat them as "
+            "high-priority requirements and apply them wherever the source supports it, overriding conflicting "
+            "default guidance — but never invent content the source does not contain."
+            if user_guidance
+            else ""
+        )
+
+        # --- Mode-specific section (the only draft-vs-full branch) ---
         if draft_max_rows is not None:
             if draft_min_rows is None or draft_min_rows > draft_max_rows:
                 draft_min_rows = draft_max_rows
-            draft_guide = load_sample_draft_guide()
-            system_prompt += (
-                " You are producing a SAMPLE DRAFT for human approval, not a full extraction. "
-                f"Produce AT LEAST {draft_min_rows} rows, and MORE (up to {draft_max_rows}) so the sample showcases "
-                "every distinct TRANSFORMATION CASE — a place where the source-to-row logic behaves DIFFERENTLY, NOT "
-                "merely a different section or topic. The reviewer needs to approve how each tricky case is handled, "
-                "so include about THREE rows demonstrating EACH transformation case the source exhibits (fewer only "
-                "if the source genuinely has fewer than three instances), so the reviewer sees each rule applied "
-                "consistently rather than just once. The pre-extraction plan's variation_anchors already identify "
-                "the cases found in THIS source — cover each of them. The following are COMMON EXAMPLES of such "
-                "cases, but they are NOT exhaustive and NOT required; cover whichever the source actually has, plus "
-                "any other transformation case present even if it is not listed here: "
+            mode_section = (
+                "# MODE: SAMPLE DRAFT (for human approval, not a full extraction)\n"
+                f"Produce AT LEAST {draft_min_rows} rows, and MORE (up to {draft_max_rows}) so the sample "
+                "showcases every distinct TRANSFORMATION CASE — a place where the source-to-row logic behaves "
+                "DIFFERENTLY, NOT merely a different section or topic. The reviewer needs to approve how each "
+                "tricky case is handled, so include about THREE rows demonstrating EACH transformation case the "
+                "source exhibits (fewer only if the source genuinely has fewer than three instances). The "
+                "pre-extraction plan's variation_anchors already identify the cases found in THIS source — cover "
+                "each of them. The following are COMMON EXAMPLES of such cases, but they are NOT exhaustive and "
+                "NOT required; cover whichever the source actually has, plus any other transformation case "
+                "present even if it is not listed here: "
                 "(a) one description/standard that applies to MULTIPLE topics → merge the topic names into one cell with ' | ' (do not duplicate the row just to repeat topics); "
-                "(b) a description built from a parent statement plus child sub-parts → merge them as 'parent: child' so the row keeps full meaning; "
+                "(b) a parent statement with child sub-parts → if the parent is emitted as its own row, keep each child's description to the child's OWN text; only when the parent is NOT its own row, merge it into the child as 'parent: child' so the child keeps full meaning (never both); "
                 "(c) a Display standard code that must be CHANGED — a raw code repeats across domains so it needs a short domain/topic prefix and a dot, or bullet items with no code need synthetic sequence numbers; "
                 "(d) a benchmark marked for MULTIPLE option tracks (CST/TS/S etc.) → emit one row per marked track; "
                 "(e) a value that must be INHERITED from a section/heading because it is not printed beside the benchmark; "
@@ -1166,64 +1264,36 @@ Source markdown:
                 f"until you reach at least {draft_min_rows}. A very clean source with no tricky cases should still "
                 f"return {draft_min_rows} ordinary rows. "
                 f"Never exceed {draft_max_rows} rows and do NOT attempt exhaustive coverage of the whole document. "
-                "Follow the sample-drafting guide below for exact per-column fill rules and row-formation rules."
+                "The sample-drafting guide below carries additional per-column and workflow detail."
             )
+            draft_guide = load_sample_draft_guide()
             if draft_guide:
-                system_prompt += "\n\n=== SAMPLE DRAFTING GUIDE ===\n" + draft_guide
-            system_prompt += (
-                "\n\nCRITICAL - PRESERVE SOURCE CASING: Copy every value verbatim from the source, "
-                "keeping the ORIGINAL capitalization exactly as written. Do NOT lowercase, uppercase, "
-                "title-case, or otherwise normalize letter case in description, topic, domain, subject, "
-                "codes, or any other field. If the source says 'In a predator-prey relationship', return "
-                "'In a predator-prey relationship' — never 'in a predator-prey relationship'."
-            )
-            system_prompt += (
-                "\n\nCRITICAL - TOP-PRIORITY COLUMN RULES (these override anything above if they conflict):\n"
-                "1. STRIP STRUCTURAL PREFIXES from domain and topic. Remove leading unit/topic/module/cluster "
-                "markers and their numbers, keeping only the real heading name. "
-                "'Unit 1: The Living World: Ecosystems' -> 'The Living World: Ecosystems'; "
-                "'Topic 1.1: Introduction to Ecosystems' -> 'Introduction to Ecosystems'. "
-                "Never leave a 'Unit N:', 'Topic N.N:', 'Module N:', or 'Cluster N.N' label in domain or topic "
-                "when a real heading name is present.\n"
-                "2. display_grade must be the DISPLAYED LEARNER GRADE BAND, expressed as a grade/year/stage — "
-                "NEVER the grade_level bucket and NEVER a program/course label. Do NOT put 'Elementary School' / "
-                "'Middle School' / 'High School' here, and do NOT put a course or program name such as 'AP', 'IB', "
-                "'Honors', 'Advanced Placement', 'GCSE', or 'A-Level' here — those name the course, not the grade. "
-                "Use an actual grade band such as 'K', '9', 'Year 12', 'Stage 4', or a range like '9-12'. When the "
-                "source only names a program/course (e.g. an AP or other senior secondary course) with no explicit "
-                "grade printed, use the grade band that course is taught at ('9-12' for AP and similar senior "
-                "secondary courses) — never the program name itself.\n"
-                "3. grade_number must be the SORTABLE grade value, never a text label like 'High School' and never a "
-                "program name like 'AP'. Expand ranges to a comma-separated sequence with NO spaces: "
-                "'9-12' -> '9,10,11,12'. If the source states no grade, derive it from the same band used for "
-                "display_grade (e.g. an AP course -> '9,10,11,12').\n"
-                "4. l3 MAY be filled when the source genuinely has a THIRD hierarchy level between topic and the "
-                "benchmark (i.e. subject > domain > topic > l3 > benchmark). This OVERRIDES the guide's default of "
-                "leaving l3 blank: if such a real third level exists, put its named heading in l3; if it does not, "
-                "leave l3 empty. Do NOT invent an l3, and do NOT copy the description or a topic/cluster code into "
-                "it. l4 and l5 stay blank in the sample draft.\n"
-                "5. domain must NEVER be empty; topic MAY be empty. If the source has only ONE named grouping level "
-                "above the benchmark (no separate domain and topic), put that grouping in DOMAIN and leave TOPIC "
-                "empty — promote topic up into domain, never the reverse. Only fill topic when the source genuinely "
-                "has a second, finer grouping beneath domain. Do NOT invent a domain and do NOT duplicate the same "
-                "value into both domain and topic."
+                mode_section += "\n\n=== SAMPLE DRAFTING GUIDE ===\n" + draft_guide
+        else:
+            mode_section = (
+                "# MODE: FULL EXTRACTION\n"
+                "This is NOT a sampling task. Produce rows for EVERY benchmark item in the source. The "
+                "pre-extraction analysis identified expected_total_rows as the target count; your extraction must "
+                "approach it. Treat section_inventory as a mandatory checklist — produce rows for EVERY section "
+                "and sub-section it lists, at the granularity in row_formation_logic (one row per benchmark/"
+                "sub-item). Do not skip, summarize, truncate, or collapse sub-items, and do not stop after a few "
+                "examples. Work systematically through the entire source, section by section, until all content "
+                "is extracted."
             )
 
-        exhaustive_or_draft_instruction = (
-            f"5. SAMPLE DRAFT MODE: Produce AT LEAST {draft_min_rows} rows, going higher (up to {draft_max_rows}) to "
-            "cover every distinct TRANSFORMATION CASE — a place where the source-to-row logic behaves differently, "
-            "NOT merely a different section. The distinct cases for this source are whatever the pre-extraction "
-            "plan's variation_anchors identified — cover each of them, and any other transformation case you "
-            "notice while extracting, even if it is not in the examples. Give about THREE rows for EACH case so "
-            "the reviewer sees the rule applied consistently (fewer only if the source has fewer instances). "
-            "COMMON examples (not exhaustive): multi-topic standards merged with ' | ', parent+child descriptions "
-            "merged as 'parent: child', Display standard codes that had to be changed/disambiguated, option-track "
-            "fan-out (CST/TS/S), values inherited from a heading, and real content separated from adjacent noise — "
-            "plus about three ordinary rows as a baseline. Prefer covering DIFFERENT transformation cases (three "
-            "rows each) over repeating the same easy case. Do NOT extract the whole document and do NOT aim for "
-            "expected_total_rows — this is a preview."
-            if draft_max_rows is not None
-            else "5. CRITICAL - EXHAUSTIVE EXTRACTION REQUIRED: This is NOT a sampling task. You MUST produce rows for EVERY SINGLE benchmark item in the source document. The pre-extraction analysis identified expected_total_rows as the target count. Your extraction MUST approach that count. Treat section_inventory as a mandatory checklist - produce rows for EVERY section and sub-section it lists, at the row granularity given in row_formation_logic (one row per benchmark/sub-item). Do not skip, summarize, truncate, or collapse sub-items. Do not stop after a few examples. If you produce significantly fewer rows than expected_total_rows (e.g., only 10-20 rows when 500+ are expected), you have FAILED this extraction task. Work systematically through the entire source document section by section until all content is extracted."
+        system_prompt = "\n\n".join(
+            section
+            for section in (
+                role_section,
+                method_section,
+                column_rules_section,
+                fidelity_section,
+                row_formation_section,
+                output_section,
+                user_instructions_section,
+                mode_section,
+            )
+            if section
         )
 
         user_prompt = f"""
@@ -1232,7 +1302,7 @@ Schema to populate:
 
 Sample CSV transformation contract:
 {sample_contract_json}
-
+{user_guidance_block}
 Pre-extraction understanding artifact:
 {planning_json}
 
@@ -1244,18 +1314,11 @@ Document metadata:
 {("Chunking note:\n" + chunk_note + chr(10)) if chunk_note else ""}Validation feedback:
 {correction_block}
 
-Instructions:
-1. Use the pre-extraction understanding artifact before extracting any values.
-2. Build a temporary field anchoring plan explaining where each schema field appears in this specific layout.
-3. Apply the sample-derived meaning of each column consistently across all rows. Once you infer what source, subject, domain, topic, grade_level, display_grade, and grade_number mean for this subject, do not drift to a different interpretation. grade_level must be exactly Elementary School, Middle School, or High School.
-4. {"Produce clean, representative rows for the sample draft (see item 5); do not attempt full coverage." if draft_max_rows is not None else "Extract every valid output row from the source, not just one row."}
-{exhaustive_or_draft_instruction}
-6. Return payload_rows in source reading order with one object per output row.
-7. If the approved sample supports canonical public source links, use those links when they are identifiable from the source documents or staging context instead of local file names.
-8. If the approved sample supports merged topic cells and one standard genuinely spans multiple topics, merge those topic names into one topic field using ` | ` rather than duplicating the row only for topic labels.
-9. If the approved sample supports prefixed or formed display codes and the same raw display standard code repeats, disambiguate it with a short domain code or topic code prefix and a dot when that is needed to keep `Display standard code` unique.
-10. If the source contradicts the draft representative_row, follow the source while preserving the sample contract.
-11. Honor progression_matrix_legend, row_scope_rules, and document_to_sample_track_mapping from the pre-extraction artifact. When parsed placement hints list `applies_to` and `not_for` tracks for a benchmark, create rows only for `applies_to` tracks and skip `not_for` tracks entirely. Use document_to_sample_track_mapping to translate document track labels (e.g., 'CST') into the correct sample CSV display code segments (e.g., '.CST.') when forming Display standard code values.
+Follow the system-prompt sections (COLUMN RULES, FIDELITY, ROW FORMATION, OUTPUT, MODE) for this run. In addition, for THIS payload:
+- Build a temporary field anchoring plan explaining where each schema field appears in this specific layout, then extract using it.
+- If the approved sample supports canonical public source links, use those links when identifiable from the source documents or staging context instead of local file names.
+- If the source contradicts the sample's representative_row, follow the source while preserving the sample contract's column semantics.
+- Honor progression_matrix_legend, row_scope_rules, and document_to_sample_track_mapping from the pre-extraction artifact. When parsed placement hints list `applies_to` and `not_for` tracks for a benchmark, create rows only for `applies_to` tracks and skip `not_for` tracks entirely. Use document_to_sample_track_mapping to translate document track labels (e.g., 'CST') into the correct sample CSV display code segments (e.g., '.CST.') when forming Display standard code values.
 
 Source markdown:
 {source_markdown}

@@ -21,9 +21,8 @@ from batch_runner import (
     create_model_settings,
     run_batches,
 )
-from config import DEFAULT_SCHEMA_CONFIG_PATH, INPUT_DIR, OUTPUT_DIR, ROOT_DIR, RUNTIME_DIR, Settings, get_runtime_paths
+from config import DEFAULT_SCHEMA_CONFIG_PATH, INPUT_DIR, OUTPUT_DIR, ROOT_DIR, Settings
 from csv_audit import audit_extracted_csv
-from csv_finalization import finalize_extracted_csv
 from schemas import get_output_column_name, load_schema_config
 import s3_persistence
 
@@ -34,49 +33,6 @@ MAX_FILE_SIZE_BYTES = 20 * 1024 * 1024
 VALID_BATCH_NAME = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]*$")
 SAMPLE_ROW_RANGE_PATTERN = re.compile(r"\b(\d{1,2})\s*(?:to|-)\s*(\d{1,2})\s*rows?\b", re.IGNORECASE)
 SAMPLE_ROW_COUNT_PATTERN = re.compile(r"\b(\d{1,2})\s*rows?\b", re.IGNORECASE)
-
-# Sticky Google Sheet target. A pasted link/ID is saved here and reused for every
-# subsequent sync until the user pastes a different one (global, not per-batch).
-SHEET_LINK_PATH = RUNTIME_DIR / "google_sheet_link.json"
-_SHEET_ID_IN_URL = re.compile(r"/spreadsheets/d/([a-zA-Z0-9\-_]+)")
-_SHEET_ID_BARE = re.compile(r"^[a-zA-Z0-9\-_]{20,}$")
-
-
-def extract_sheet_id(link_or_id: str) -> str:
-    """Pull the spreadsheet ID from a full Sheets URL, or accept a raw ID."""
-    text = (link_or_id or "").strip()
-    if not text:
-        return ""
-    match = _SHEET_ID_IN_URL.search(text)
-    if match:
-        return match.group(1)
-    return text if _SHEET_ID_BARE.match(text) else ""
-
-
-def _load_saved_sheet_id() -> str:
-    try:
-        data = json.loads(SHEET_LINK_PATH.read_text(encoding="utf-8"))
-        return str(data.get("spreadsheet_id", "") or "").strip()
-    except (OSError, json.JSONDecodeError):
-        return ""
-
-
-def _save_sheet_id(spreadsheet_id: str) -> None:
-    SHEET_LINK_PATH.parent.mkdir(parents=True, exist_ok=True)
-    SHEET_LINK_PATH.write_text(json.dumps({"spreadsheet_id": spreadsheet_id}, indent=2), encoding="utf-8")
-
-
-def resolve_sheet_id(settings: Settings, pasted: str = "") -> str:
-    """Precedence: a freshly pasted link/ID (saved) > last saved > .env default."""
-    extracted = extract_sheet_id(pasted)
-    if extracted:
-        _save_sheet_id(extracted)
-        return extracted
-    saved = _load_saved_sheet_id()
-    if saved:
-        return saved
-    return (settings.google_sheets_spreadsheet_id or "").strip()
-
 
 class UiServer(ThreadingHTTPServer):
     def __init__(self, server_address: tuple[str, int], settings: Settings) -> None:
@@ -149,10 +105,6 @@ class UiRequestHandler(BaseHTTPRequestHandler):
                 response = handle_fix_reviewed_batch(self.server.settings, payload)
                 self._send_json(response)
                 return
-            if parsed.path == "/api/sync-batch":
-                response = self._handle_sync_batch(payload)
-                self._send_json(response)
-                return
             self._send_error_json(HTTPStatus.NOT_FOUND, "Endpoint not found.")
         except ValueError as exc:
             self._send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
@@ -171,9 +123,6 @@ class UiRequestHandler(BaseHTTPRequestHandler):
 
     def _handle_audit_batch(self, payload: dict[str, Any]) -> dict[str, Any]:
         return handle_audit_batch(self.server.settings, payload)
-
-    def _handle_sync_batch(self, payload: dict[str, Any]) -> dict[str, Any]:
-        return handle_sync_batch(self.server.settings, payload)
 
     def _serve_static(self, filename: str, content_type: str) -> None:
         path = (UI_DIR / filename).resolve()
@@ -248,6 +197,7 @@ def handle_draft_sample(settings: Settings, payload: dict[str, Any]) -> dict[str
                 name=batch_name,
                 input_files=[*(str(path) for path in document_files), *source_urls],
                 draft_only=True,
+                sample_instructions=instructions or None,
                 sample_row_target=_derive_requested_sample_row_target(instructions),
                 program_filter=program_filter,
             )
@@ -323,6 +273,7 @@ def handle_run_extraction(settings: Settings, payload: dict[str, Any]) -> dict[s
                 name=batch_name,
                 input_files=[*(str(path) for path in document_files), *source_urls],
                 sample_csv=str(sample_csv_path),
+                sample_instructions=instructions or None,
                 output_csv_name=str(payload.get("output_csv_name", "")).strip() or None,
                 program_filter=program_filter,
             )
@@ -621,7 +572,11 @@ def _reviewable_batches() -> list[dict[str, str]]:
             subject = (first.get("subject") or first.get("Subject") or "").strip()
         except Exception:  # noqa: BLE001 - a label read must never break the list
             subject = ""
-        out.append({"name": batch_root.name, "subject": subject or batch_root.name})
+        out.append({
+            "name": batch_root.name,
+            "subject": subject or batch_root.name,
+            "mtime": batch_root.stat().st_mtime,
+        })
     return out
 
 
@@ -769,57 +724,6 @@ def handle_fix_reviewed_batch(settings: Settings, payload: dict[str, Any]) -> di
             "corrected_name": f"{batch_name}.fixed.csv",
             "message": message,
         }
-    }
-
-
-def handle_sync_batch(settings: Settings, payload: dict[str, Any]) -> dict[str, Any]:
-    batch_name = validate_batch_name(payload.get("name"))
-    sync_sample = bool(payload.get("sample"))
-    batch_root = get_batch_root(batch_name)
-    output_dir = batch_root / "output"
-    if sync_sample:
-        csv_path = find_existing_sample_csv(batch_name)
-        if csv_path is None:
-            raise ValueError("No approved sample CSV exists for this batch yet.")
-    else:
-        csv_path = find_output_csv(output_dir)
-        if csv_path is None:
-            raise ValueError("No extracted CSV exists for this batch yet.")
-
-    batch_settings = _resolve_batch_settings(settings, output_dir)
-    # Sticky sheet target: a pasted link/ID wins and is saved; else last saved; else env.
-    from dataclasses import replace as _replace
-
-    sheet_id = resolve_sheet_id(batch_settings, str(payload.get("sheet_link", "") or ""))
-    if not sheet_id:
-        raise ValueError(
-            "No Google Sheet linked. Paste a Google Sheet link (or ID) to sync, "
-            "or set GOOGLE_SHEETS_SPREADSHEET_ID."
-        )
-    batch_settings = _replace(batch_settings, google_sheets_spreadsheet_id=sheet_id)
-    runtime_paths = get_runtime_paths(batch_root)
-    result = finalize_extracted_csv(
-        csv_path,
-        batch_settings,
-        runtime_paths,
-        sync_to_sheets=True,
-        audit_before_sync=not sync_sample,
-    )
-    return {
-        "sync": {
-            "status": result.status,
-            "message": result.message,
-            "csv_path": result.csv_path,
-            "audit_report_path": result.audit_report_path,
-            "rows_audited": result.rows_audited,
-            "issue_count": result.issue_count,
-            "audit_passed": result.audit_passed,
-            "sync_status": result.sync_status,
-            "sync_message": result.sync_message,
-            "sheet_name": result.sheet_name,
-            "spreadsheet_id": sheet_id,
-        },
-        "batch": load_batch_detail(batch_name),
     }
 
 
@@ -1071,11 +975,6 @@ def load_workspace_summary(settings: Settings) -> dict[str, Any]:
         "input_document_count": len([path for path in INPUT_DIR.iterdir() if path.is_file()]) if INPUT_DIR.exists() else 0,
         "final_output_exists": final_csv_path.exists(),
         "final_output_path": str(final_csv_path),
-        "google_sheets_sync_enabled": bool(settings.google_sheets_sync_enabled),
-        "google_sheets_spreadsheet_id_present": bool(settings.google_sheets_spreadsheet_id),
-        "linked_sheet_id": resolve_sheet_id(settings),
-        "oauth_client_secret_present": bool(settings.google_oauth_client_secret_path),
-        "oauth_token_present": Path(settings.google_oauth_token_path).expanduser().exists(),
     }
 
 
@@ -1114,9 +1013,9 @@ def load_batch_detail(batch_name: str) -> dict[str, Any]:
         "row_summary": _compute_row_summary(output_dir, clean_output_csv or output_csv),
         "manual_review": read_json_if_exists(output_dir / "manual_review.json", []),
         "processing_state": read_json_if_exists(output_dir / "processing_state.json", {}),
+        "extraction_progress": read_json_if_exists(output_dir / "extraction_progress.json", {}),
         "monitor_status": read_json_if_exists(output_dir / "monitor_status.json", {}),
         "csv_finalization_status": read_json_if_exists(output_dir / "csv_finalization_status.json", {}),
-        "google_sheets_sync_status": read_json_if_exists(output_dir / "google_sheets_sync_status.json", {}),
         "latest_audit_report_path": str(audit_reports[-1]) if audit_reports else "",
         "latest_audit_report": read_json_if_exists(audit_reports[-1], []) if audit_reports else [],
     }

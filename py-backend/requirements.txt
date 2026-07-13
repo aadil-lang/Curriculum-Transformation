@@ -1,7 +1,7 @@
 # Hosted (Vibe / py-backend) requirements — pure pip, no system binaries.
 # Web scraping falls back to Jina Reader (HTTP), so crawl4ai/playwright are omitted.
-# Legacy .doc (LibreOffice) and scanned-PDF OCR (Tesseract) are not supported here;
-# the code degrades gracefully when those binaries are absent.
+# Scanned-PDF OCR (Tesseract) is not supported here; the code degrades gracefully when
+# that binary is absent. Supported source formats: .pdf, .docx, and web URLs.
 fastapi>=0.115.0
 uvicorn[standard]>=0.30.0
 PyMuPDF>=1.24.9
@@ -11,9 +11,6 @@ pydantic>=2.8.2
 instructor>=1.3.7
 pandas>=2.2.2
 google-genai>=1.28.0
-google-api-python-client>=2.154.0
-google-auth>=2.35.0
-google-auth-oauthlib>=1.2.1
 openai>=1.40.0
 anthropic>=0.34.2
 portkey-ai>=1.12.0

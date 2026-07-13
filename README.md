@@ -11,7 +11,7 @@ Document-to-CSV extraction agent for curriculum and standards sources. The agent
 - validates rows before append using review and critic stages
 - can run a fast Claude Map-Reduce extractor that chunks documents, maps chunks in parallel with strict tool-use JSON, and merges rows deterministically
 - audits extracted CSVs against their sources
-- syncs approved sample CSVs or final extracted CSVs to Google Sheets only when explicitly requested
+- produces downloadable cleaned CSV outputs from approved extraction runs
 
 ## Core Workflow
 
@@ -21,7 +21,7 @@ The agent is designed to follow this sequence:
 2. Use that approved sample as the schema and style contract.
 3. Run full extraction.
 4. Audit the extracted CSV.
-5. Optionally sync to Google Sheets with a manual command.
+5. Download the finalized CSV output.
 
 ## Repository Layout
 
@@ -33,7 +33,6 @@ The agent is designed to follow this sequence:
 - `validation/critic.py`: legacy semantic critic gate
 - `claude_map_reduce.py`: high-performance Claude Map-Reduce extraction path
 - `csv_audit.py`: extracted CSV auditing
-- `google_sheets_sync.py`: Google Sheets delivery
 - `schema_config.json`: default workspace schema
 - `sample_csv_column_prompt.md`: human-readable column and quality rules
 - `input_documents/`: staged raw inputs
@@ -47,8 +46,9 @@ Requirements:
 - a virtual environment
 - provider credentials for extraction and critic calls
 - **System tools (not pip-installable):**
-  - **LibreOffice** — converts legacy `.doc` syllabuses to `.docx` for parsing (`soffice --headless`). Install with `brew install --cask libreoffice` (macOS) or your package manager. Only needed if you extract from `.doc` files.
   - **Playwright browsers** — used by Crawl4AI to scrape webpage sources. Installed via `crawl4ai-setup` (below).
+
+Supported source formats: `.pdf`, `.docx`, and web URLs.
 
 Suggested setup:
 
@@ -64,12 +64,10 @@ python main.py bootstrap
 python main.py verify
 ```
 
-For `.doc` support, also install LibreOffice (see System tools above).
-
 ### Docker (VM / server deployment)
 
-The included `Dockerfile` bakes all three layers — Python deps, LibreOffice, and the
-Playwright/Chromium browser with its system libraries — so no manual VM setup is needed.
+The included `Dockerfile` bakes both layers — Python deps and the Playwright/Chromium
+browser with its system libraries — so no manual VM setup is needed.
 
 ```bash
 docker build -t curriculum-transform .
@@ -77,7 +75,6 @@ docker build -t curriculum-transform .
 # Secrets are NOT baked into the image; pass them at run time.
 docker run -p 8765:8765 \
   -e PORTKEY_API_KEY=your_key \
-  -e GOOGLE_SHEETS_SPREADSHEET_ID=your_sheet_id \
   -v "$(pwd)/output:/app/output" \
   curriculum-transform
 ```
@@ -177,7 +174,7 @@ Short version:
 - standalone CLI usage: Portkey is optional, but some provider configuration is still required with the current implementation
 - temporary `codex_chat_assisted` mode: preserves the current UI shape while treating Codex chat as the execution surface for the time being
 
-Google Sheets related configuration is optional and only needed if you plan to use manual sheet sync.
+Only the extraction and CSV-audit configuration is needed for current agent workflows.
 
 ## Main Commands
 
@@ -310,28 +307,6 @@ python main.py audit-csv \
   --sample-csv /absolute/path/to/approved-sample.csv
 ```
 
-## Google Sheets Sync
-
-Google Sheets sync is manual by design. It does not run automatically during ordinary extraction.
-
-Authorize OAuth user login:
-
-```bash
-python main.py google-oauth-login --client-secret /absolute/path/to/client_secret.json
-```
-
-Sync a final extracted CSV:
-
-```bash
-python main.py sync-sheet --csv /absolute/path/to/extracted.csv
-```
-
-Sync an approved sample CSV without full extracted-CSV audit:
-
-```bash
-python main.py sync-sheet --csv /absolute/path/to/sample.csv --sample
-```
-
 ## Extraction Rules the Agent Follows
 
 The active approved sample CSV is the contract for:
@@ -368,7 +343,7 @@ Common runtime locations:
 - `output/transformation_reviews/`
 - `output/chat_batches/<batch-name>/`
 
-The repository ignores local runtime artifacts, staged input documents, OAuth tokens, and output files so the codebase stays shareable.
+The repository ignores local runtime artifacts, staged input documents, and output files so the codebase stays shareable.
 
 ## Sharing the Agent
 
@@ -376,7 +351,6 @@ Other users can clone the repository and run the agent, but they still need to p
 
 - their own `.env`
 - their own model credentials
-- their own Google OAuth setup if they want Sheets sync
 - their own approved sample CSVs or default schema
 
 ## Troubleshooting
@@ -392,9 +366,3 @@ If extraction is rejected:
 - inspect `output/manual_review.json`
 - inspect `output/transformation_reviews/`
 - run `python main.py audit-csv --audit-csv <csv>`
-
-If Google Sheets sync fails:
-
-- confirm OAuth login completed
-- confirm the linked spreadsheet is accessible to the authenticated account
-- confirm the spreadsheet ID and related settings are configured

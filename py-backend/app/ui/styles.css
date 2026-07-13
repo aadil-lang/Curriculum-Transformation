@@ -59,7 +59,7 @@ body::after {
 }
 
 .hero {
-  padding: 10px 8px 26px;
+  padding: 8px 8px 16px;
 }
 
 .eyebrow {
@@ -74,8 +74,8 @@ body::after {
 .hero h1 {
   margin: 0;
   font-family: Georgia, "Times New Roman", serif;
-  font-size: clamp(2.2rem, 4vw, 4.2rem);
-  line-height: 0.95;
+  font-size: clamp(1.3rem, 2vw, 1.9rem);
+  line-height: 1.1;
 }
 
 
@@ -361,53 +361,6 @@ textarea {
   border: 1px solid rgba(18, 24, 30, 0.18);
   background: #101214;
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
-}
-
-.sheet-toolbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 14px 18px;
-  background: #17191b;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-}
-
-.sheet-title {
-  min-width: 0;
-  color: #f5f6f7;
-  font-size: 0.96rem;
-  font-weight: 500;
-  letter-spacing: 0.01em;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.sheet-toolbar-actions {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  flex-shrink: 0;
-}
-
-.sheet-pill {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  height: 34px;
-  padding: 0 14px;
-  border-radius: 999px;
-  background: #2a2d31;
-  color: #f3f4f5;
-  font-size: 0.84rem;
-  font-weight: 600;
-}
-
-.sheet-toolbar-meta {
-  color: #aeb4ba;
-  font-size: 0.8rem;
-  font-weight: 500;
 }
 
 .sheet-formula-bar {
@@ -1003,6 +956,24 @@ pre {
   border-radius: 8px;
   font: inherit;
   width: 100%;
+}
+
+.google-connect-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 0 0 10px;
+}
+
+.google-connect-status {
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.google-connect-status.is-connected {
+  color: #2f855a;
+  font-weight: 600;
 }
 
 .finding-item.suppressed {
